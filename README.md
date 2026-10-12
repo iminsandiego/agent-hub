@@ -100,3 +100,12 @@ python3 -m venv .venv
 ## Publishing to your account
 
 The helper `scripts/publish-github.sh` creates a **private** repository through your authenticated GitHub CLI and pushes the committed source. It stages the intended source directories when initializing a new checkout; review the committed files and keep runtime data outside them. See [the publication guide](docs/PUBLISH.md). Until a remote push is verified, a local checkout or ZIP is not a published GitHub repository.
+
+
+### Home coordinator capture
+
+Release 0.1.5 adds read-only T3 server event capture (`agent-hub sync-t3`) so saved
+history follows a logical T3 thread across providers. Native Codex and Claude
+watchers remain complementary sources. See [client setup](docs/CLIENTS.md#t3-saved-history-capture-015).
+Agent Hub supplies durable history and retrieval; it does not itself make a
+single unlimited model context, route tasks, or implement T3 coordinator tools.

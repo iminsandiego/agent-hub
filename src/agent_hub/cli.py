@@ -214,6 +214,22 @@ def plan_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def sync_t3_command(args: argparse.Namespace) -> int:
+    from .t3_history import sync_t3
+    config = config_for(args)
+    try:
+        while True:
+            result = sync_t3(config, args.database, args.checkpoint, project=args.project)
+            if result["captured"] or args.once:
+                output(result)
+                sys.stdout.flush()
+            if args.once:
+                return 0
+            time.sleep(10)
+    except KeyboardInterrupt:
+        return 0
+
+
 def watch(args: argparse.Namespace) -> int:
     config = config_for(args)
     if not 1 <= args.poll_seconds <= 60:
@@ -330,6 +346,12 @@ def register_commands(subparsers) -> None:
     planner.add_argument("--final", action="store_true")
     planner.add_argument("--output", help="Write a new private inventory file; existing files are preserved")
     planner.set_defaults(func=plan_import)
+    t3_sync = subparsers.add_parser("sync-t3", help="Capture T3's saved conversation events read-only across all providers")
+    t3_sync.add_argument("--database", required=True)
+    t3_sync.add_argument("--checkpoint", required=True)
+    t3_sync.add_argument("--project")
+    t3_sync.add_argument("--once", action="store_true")
+    t3_sync.set_defaults(func=sync_t3_command)
     watcher = subparsers.add_parser("watch", help="Drain durable capture jobs and watch configured transcript paths")
     watcher.add_argument("--once", action="store_true")
     watcher.add_argument("--no-scan", action="store_true")

@@ -312,3 +312,48 @@ Install Agent Hub, configure the appropriate provider home, and run its watcher 
 Tests use synthetic Codex/Claude fixtures, append/retry/conflict scenarios, offline state, setup preservation, Unicode/Windows path cases, a synthetic app-server subprocess, and a real official-SDK stdio-to-HTTP round trip. No real personal transcript was captured during development. Native Claude lifecycle behavior, native Windows/macOS execution, and live T3 provider delivery require the installation check above. Client formats and experimental protocol fields can change; recheck them after upgrades rather than assuming every future version is compatible.
 
 Primary client documentation and source were checked on 2026-10-07. The broader project's executed checks are recorded in [VALIDATION.md](VALIDATION.md).
+
+
+## T3 saved-history capture (0.1.5)
+
+Native Codex capture covers Codex provider transcripts, not every T3 provider or
+T3-owned message/activity. Run this additional reader on the **T3 server host**:
+
+```sh
+agent-hub --config /absolute/client.json sync-t3 \
+  --database /home/USER/.t3/userdata/state.sqlite \
+  --checkpoint /home/USER/.config/agent-hub/t3-checkpoint.json
+```
+
+Use `--once` for an acceptance pass. The first pass imports saved thread events;
+subsequent passes poll every ten seconds, up to 200 source events per pass. Use a
+service supervisor with restart-on-failure. A database outage, schema mismatch,
+server rejection or reset is visible and does not advance the checkpoint past
+unacknowledged history. Preserve the checkpoint when diagnosing failures.
+
+This adapter is qualified against T3 **0.0.45's v1 orchestration_events schema**.
+It reads only that table through a bounded read-only SQLite snapshot, releasing
+the snapshot before HTTP calls. Source event IDs, sequence, original JSON strings,
+thread IDs, model/provider changes, message revisions and activities are retained.
+A thread remains one logical T3 session across provider changes. It excludes auth
+and provider runtime tables. It archives persisted events, not hidden prompts,
+unsaved output, or attachment binary files. Future T3 schema/event-retention
+changes require adapter review; do not delete checkpoints to hide a reset.
+
+T3 and native provider capture are separate attributed sources; the same visible
+answer may appear in both. They are not falsely merged or counted as independent
+facts. T3 capture covers saved Claude/Grok/Cursor events even without a native
+parser for those providers. It does not install a provider or prove its inference
+works. Standalone Grok and Cursor archive import are not implemented here.
+
+`scripts/watch-local.py` supplies a changed-file watcher for Codex/Claude JSONL
+roots plus the durable native hook queue. Its first pass baselines old files;
+new or resumed files are captured. Configure roots belonging to the intended OS
+user. Historical bulk import remains explicit. If the process is down and a
+source is deleted before capture, that source cannot be recovered from a cursor.
+
+A home profile can use one default project with `strict_scope: false`, no path
+allowlist and no domain lock. This allows unrelated home projects without prompts
+or directory guards. Authentication and immutable source protection still apply.
+Work can use an independent server/profile. This permissive home deployment does
+not automatically exclude employer files opened in local native sessions.

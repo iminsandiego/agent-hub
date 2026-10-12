@@ -1,3 +1,32 @@
+## Current update: 0.1.5, October 11–12, 2026
+
+This section supersedes the original build's target-installation/publication
+blockers below. Private GitHub publication and 0.1.4 CI were subsequently verified.
+The home VM service, authenticated Mac SSH tunnel and both native watchers were
+installed. Actual harmless Codex and Claude CLI replies from both Mac and Agent VM
+were found in the shared store with exact assistant text and source provenance.
+Those checks establish native CLI capture, not a T3 UI lifecycle or trusted hook
+startup-context injection. Codex hook trust and app reload remain client checks.
+
+For 0.1.5, macOS Python 3.12 full suite: **261 passed**, one upstream Starlette
+warning. Command: `PYTHONPATH=src python -m pytest -q`, using the development
+venv. The loopback MCP test required ordinary local socket access outside the
+sandbox. Eight new synthetic T3 tests cover read-only/raw preservation, Unicode,
+source identity, provider changes/message revisions, acknowledgements, replay,
+bounded passes, schema errors, source reset and destination mismatch.
+
+Home VM acceptance: 104/104 saved T3 thread records matched their original
+source rows and normalized text, with authenticated HTTP retrieval verified.
+Source/checkpoint sequence both 107; saved provider names Codex, Claude and Grok.
+The separate user service is enabled/active. This is saved-history comparison;
+a fresh T3 UI turn and Cursor inference were not exercised.
+
+The T3 adapter targets the live home server's 0.0.45 event schema. Native Cursor,
+standalone Grok, Windows historical import and a T3 V2 coordinator upgrade are not
+qualified by these tests. No model worker is enabled by default.
+
+---
+
 # Validation evidence
 
 ## Version 0.1.4 Windows backup correction
