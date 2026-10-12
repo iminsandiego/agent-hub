@@ -162,7 +162,8 @@ def _heuristic(store, project, events) -> int:
                 kind = "decision" if match[1].lower() in {"decision", "we decided"} else "instruction"
                 event_id = event.get("id", event.get("event_id"))
                 key = "heuristic-v1:" + hashlib.sha256((event_id + line).encode()).hexdigest()
-                store.add_memory(project, line, kind, [event_id], created_by="heuristic-v1", idempotency_key=key)
+                store.add_memory(project, line, kind, [event_id], created_by="heuristic-v1", idempotency_key=key,
+                                 expected_privacy_revision=event.get("privacy_revision"))
                 count += 1
     return count
 
@@ -259,7 +260,8 @@ def run_worker(settings: ServerSettings, *, project: str, use_llm: bool = False,
                     for value in validated:
                         key = "llm-extract-v1:" + hashlib.sha256((event_id + value.statement + value.kind).encode()).hexdigest()
                         store.add_memory(project, value.statement, value.kind, value.source_event_ids,
-                                         created_by="llm:" + provider.model, idempotency_key=key)
+                                         created_by="llm:" + provider.model, idempotency_key=key,
+                                         expected_privacy_revision=event.get("privacy_revision"))
                         result["candidate_operations"] += 1
                     _advance(ledger, project, "llm-extract-v1", event["sequence"])
                     result["events_processed"] += 1

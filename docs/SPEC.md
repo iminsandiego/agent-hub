@@ -203,3 +203,13 @@ The repository must demonstrate meaningful tests for:
 `docs/VALIDATION.md` records executed commands, actual outcomes, and unexecuted native/deployment gates. A CI workflow is configuration until it has run. A local server smoke test is not the owner's server deployment. A fixture hook test is not an installed-client certification. A Git commit or ZIP is not a verified remote push.
 
 Future work is additive: richer multi-source extraction, semantic retrieval if justified by measured misses, native-format evolution, curated plugin/skill installation, stronger enterprise identity, and device-specific MCPs. These must preserve the event archive, project boundaries, explicit evidence references, and reversible review history established here.
+
+## Explicit privacy exclusions (0.1.6)
+
+The immutable archive has an explicit user-authorized erasure exception. The
+server maintains a separate content-free identity/relationship ledger. Temporary
+prefixes and administrator exclusions are enforced before ingestion, including
+late aliases. Purge removes live originals and source-linked derivatives,
+preserves surviving source IDs/sequence positions, and invalidates in-flight
+semantic work. Restore requires current policy; offline context caches are not
+used. See TEMPORARY_CHATS.md for protocol boundaries and backup limitations.

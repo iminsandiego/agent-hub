@@ -174,9 +174,11 @@ HTTP transport does not replace local capture. Keep the hook client and watcher 
 
 The installed `Stop` and `SessionEnd` handlers only enqueue the source path or native thread identity in a local SQLite outbox. They do not read a transcript, call a model, upload over the network, or spawn a background uploader. This keeps end-of-session work short. The independent `watch` process uploads complete records and retries failures with backoff.
 
-`SessionStart` also requests an overview for the mapped working directory. Hook context is capped at 8,000 characters and trims whole source lines. A successful request refreshes a local cache; a transport failure can use a timestamped cache for up to seven days. Cache entries are scoped to the server, project, and credential. Explicit authentication/authorization failures do not use cached history. An absent or expired cache produces no historical injection.
-
-Refresh a project's cache manually with `agent-hub context --project atlas`. It is also refreshed by successful startup requests. The watcher does not periodically refresh every project's cache. Context injection adds tokens to the native model's prompt; the extension does not control its native compaction or prompt cache.
+`SessionStart` requests live context for the mapped directory, capped at 8,000
+characters and trimmed at source-line boundaries. Persistent offline memory
+caches are no longer written or used; upgrade clears their old rows. An outage
+produces no historical injection, so forgotten content cannot return from a
+seven-day fallback. Use `agent-hub context` for a live manual lookup.
 
 Current [Codex hook documentation](https://learn.chatgpt.com/docs/hooks) exposes startup/resume/clear/compact contexts, permits a null transcript path, and makes `SessionEnd` synchronous with a short timeout. Transcript format is explicitly unstable. End events are not a complete subagent archive. Agent Hub also captures at `Stop` to reduce dependence on final close behavior.
 
@@ -340,11 +342,12 @@ server rejection or reset is visible and does not advance the checkpoint past
 unacknowledged history. Preserve the checkpoint when diagnosing failures.
 
 This adapter is qualified against T3 **0.0.45's v1 orchestration_events schema**.
-It reads only that table through a bounded read-only SQLite snapshot, releasing
+It reads that event table through a bounded read-only SQLite snapshot, releasing
 the snapshot before HTTP calls. Source event IDs, sequence, original JSON strings,
 thread IDs, model/provider changes, message revisions and activities are retained.
 A thread remains one logical T3 session across provider changes. It excludes auth
-and provider runtime tables. It archives persisted events, not hidden prompts,
+and runtime payloads. Privacy linking additionally extracts only native thread IDs
+from the provider resume cursor. It archives persisted events, not hidden prompts,
 unsaved output, or attachment binary files. Future T3 schema/event-retention
 changes require adapter review; do not delete checkpoints to hide a reset.
 
@@ -365,3 +368,5 @@ allowlist and no domain lock. This allows unrelated home projects without prompt
 or directory guards. Authentication and immutable source protection still apply.
 Work can use an independent server/profile. This permissive home deployment does
 not automatically exclude employer files opened in local native sessions.
+
+See [temporary chats, exclusions and historical backfill](TEMPORARY_CHATS.md).

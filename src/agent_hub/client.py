@@ -99,8 +99,14 @@ class ClientConfig:
     domain: str | None = None
     allowed_projects: list[str] = field(default_factory=list)
     strict_scope: bool = False
+    t3_database: str | None = None
+    codex_database: str | None = None
 
     def __post_init__(self) -> None:
+        if self.t3_database is not None and (not isinstance(self.t3_database, str) or not self.t3_database or not Path(self.t3_database).expanduser().is_absolute()):
+            raise ClientError("t3_database must be an absolute SQLite path or null")
+        if self.codex_database is not None and (not isinstance(self.codex_database, str) or not self.codex_database or not Path(self.codex_database).expanduser().is_absolute()):
+            raise ClientError("codex_database must be an absolute SQLite path or null")
         if self.schema_version != 1:
             raise ClientError("Unsupported client configuration schema_version.")
         if not isinstance(self.strict_scope, bool):
@@ -271,10 +277,21 @@ class MemoryClient:
         self.config.check_transcript(transcript, project)
         clean = [{k: v for k, v in event.items() if not k.startswith("_")} for event in events]
         wire_client = {"jsonl": "generic", "codex-app-server": "codex"}.get(transcript.client, transcript.client)
+        from .privacy import temporary_message
+        from .session_links import related_sessions
+        aliases = related_sessions(self.config.t3_database, wire_client, transcript.session_id)
+        if wire_client == "codex":
+            native_id = transcript.session_id.removesuffix(":app-server-v2")
+            aliases.extend([{"client": "codex", "session_id": native_id},
+                            {"client": "codex", "session_id": native_id + ":app-server-v2"}])
         return self.request("POST", "v1/ingest", json={
             "project": project, "client": wire_client, "machine": self.config.machine_id,
             "session_id": transcript.session_id, "events": clean,
             "metadata": {k: v for k, v in transcript.metadata.items() if k not in {"pending_turns", "unknown_types"}},
+            "related_sessions": aliases,
+            "temporary": transcript.temporary or temporary_message(transcript.events or events),
+            "parent_sessions": ([{"client": wire_client, "session_id": transcript.parent_session_id or transcript.metadata["parent_session_id"]}]
+                                if transcript.parent_session_id or transcript.metadata.get("parent_session_id") else []),
         })
 
 
@@ -290,6 +307,7 @@ class LocalState:
         self.path = directory / "client.sqlite3"
         with self.connect() as db:
             db.executescript("""
+                PRAGMA secure_delete=ON;
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
@@ -305,6 +323,7 @@ class LocalState:
                     id TEXT PRIMARY KEY, text TEXT NOT NULL, captured_at REAL NOT NULL
                 );
             """)
+            db.execute("DELETE FROM cache")
         if os.name != "nt":
             self.path.chmod(0o600)
 
@@ -353,13 +372,17 @@ class LocalState:
         return dict(row) if row else None
 
     def save_checkpoint(self, identifier: str, data: bytes, offset: int, session: str, project: str, stat: os.stat_result) -> None:
+        self.save_checkpoint_hash(identifier, hashlib.sha256(data[:offset]).hexdigest(), offset, session, project, stat, size=len(data))
+
+    def save_checkpoint_hash(self, identifier: str, prefix_sha: str, offset: int, session: str,
+                             project: str, stat: os.stat_result, *, size: int | None = None) -> None:
         with self.connect() as db:
             db.execute("INSERT INTO files VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                 "offset=excluded.offset,prefix_sha=excluded.prefix_sha,session_id=excluded.session_id,"
                 "project=excluded.project,mtime_ns=excluded.mtime_ns,size=excluded.size "
                 "WHERE excluded.offset>=files.offset", (
-                identifier, offset, hashlib.sha256(data[:offset]).hexdigest(), session,
-                project, stat.st_mtime_ns, len(data),
+                identifier, offset, prefix_sha, session,
+                project, stat.st_mtime_ns, stat.st_size if size is None else size,
             ))
 
     def status(self) -> dict[str, Any]:
@@ -375,8 +398,9 @@ class LocalState:
         return hashlib.sha256(material.encode()).hexdigest()
 
     def cache_put(self, key: str, text: str) -> None:
-        with self.connect() as db:
-            db.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, text, time.time()))
+        # Memory is always retrieved live. Persisting it could resurrect a
+        # forgotten source during an outage, without a privacy revision check.
+        pass
 
     def cache_get(self, key: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -412,6 +436,10 @@ def ingest_file(
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise ClientError("The queued transcript is unavailable; it remains queued for retry.")
+    if source.stat().st_size > 16_000_000:
+        from .streaming import ingest_large_file
+        return ingest_large_file(config, source, client=client, project=project, cwd=cwd,
+                                 session_id=session_id, final=final, memory=memory, state=state)
     state = state or LocalState(config)
     data = source.read_bytes()
     stat = source.stat()
@@ -431,14 +459,21 @@ def ingest_file(
     connection = memory or MemoryClient(config)
     inserted = duplicates = 0
     try:
+        from .privacy import temporary_message
+        if temporary_message(transcript.events) and transcript.events and not pending:
+            connection.ingest(target, transcript, [transcript.events[0]])
         for batch in _batches(pending):
             receipt = connection.ingest(target, transcript, batch)
             inserted += int(receipt.get("inserted", 0))
             duplicates += int(receipt.get("duplicates", 0))
             offset = batch[-1]["_end_offset"]
             state.save_checkpoint(identifier, data, offset, transcript.session_id, target, stat)
+            if receipt.get("suppressed"):
+                break
         # Blank separator lines are safe to checkpoint after all events commit.
         state.save_checkpoint(identifier, data, transcript.complete_bytes, transcript.session_id, target, stat)
+        from .codex_titles import index_title
+        index_title(config, source, transcript, connection, project=target)
     finally:
         if owned:
             connection.close()
@@ -522,11 +557,7 @@ def bounded_context(text: str, budget: int) -> str:
 
 
 def cached_context(state: LocalState, key: str) -> str:
-    cached = state.cache_get(key)
-    if not cached or time.time() - cached["captured_at"] > 7 * 24 * 3600:
-        return ""
-    stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(cached["captured_at"]))
-    return f"Cached Agent Hub history from {stamp}; service unavailable.\n" + cached["text"]
+    return ""
 
 
 def discover_paths(config: ClientConfig, state: LocalState) -> int:

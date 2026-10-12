@@ -127,3 +127,5 @@ Before considering your server deployment complete, verify from an actual agent 
 6. A backup restores on a separate empty data directory and original source text matches.
 
 These are target-host checks. Development tests do not substitute for running them against your installed clients and server.
+
+Restore now requires the **current** `--privacy-ledger`; see [restore and forgetting](TEMPORARY_CHATS.md).

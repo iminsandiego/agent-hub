@@ -109,3 +109,5 @@ history follows a logical T3 thread across providers. Native Codex and Claude
 watchers remain complementary sources. See [client setup](docs/CLIENTS.md#t3-saved-history-capture-015).
 Agent Hub supplies durable history and retrieval; it does not itself make a
 single unlimited model context, route tasks, or implement T3 coordinator tools.
+
+Temporary chats and explicit forgetting are available in 0.1.6. See [the user guide](docs/TEMPORARY_CHATS.md).

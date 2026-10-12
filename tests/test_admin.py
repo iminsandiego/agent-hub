@@ -146,7 +146,7 @@ def test_admin_backup_and_fresh_restore_preserve_memory_but_require_new_credenti
     run_admin("backup", "--data-dir", initialized.data_dir, "--output", backup_path)
     capsys.readouterr()
     target = tmp_path / "restored-server"
-    run_admin("restore", "--data-dir", target, "--source", backup_path)
+    run_admin("restore", "--data-dir", target, "--source", backup_path, "--privacy-ledger", str(initialized.database)+".privacy.sqlite3")
     restore_output = capsys.readouterr()
     assert old_token not in restore_output.out + restore_output.err
     assert not (target / "auth.sqlite3").exists()
@@ -211,7 +211,7 @@ def test_restore_closes_all_sqlite_connections_explicitly(initialized, tmp_path,
 
     monkeypatch.setattr(sqlite3, "connect", observed_connect)
     try:
-        run_admin("restore", "--data-dir", tmp_path / "restored", "--source", backup_path)
+        run_admin("restore", "--data-dir", tmp_path / "restored", "--source", backup_path, "--privacy-ledger", str(initialized.database)+".privacy.sqlite3")
         assert opened and all(connection.closed for connection in opened)
     finally:
         for connection in opened:

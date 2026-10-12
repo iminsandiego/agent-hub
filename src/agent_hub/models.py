@@ -16,8 +16,17 @@ class EventInput(WireModel):
     event_id: str = Field(min_length=1, max_length=256)
     role: str = Field(min_length=1, max_length=40)
     text: str = Field(max_length=1_000_000)
-    raw: str = Field(max_length=2_000_000)
+    raw: str = Field(max_length=67_108_864)
     timestamp: str | None = Field(default=None, max_length=100)
+
+
+class RelatedSession(WireModel):
+    client: Literal["codex", "claude", "t3", "generic", "chatgpt"]
+    session_id: str = Field(min_length=1, max_length=256)
+
+
+class SessionPrivacyInput(WireModel):
+    mode: Literal["temporary", "forgotten"]
 
 
 class IngestInput(WireModel):
@@ -27,6 +36,9 @@ class IngestInput(WireModel):
     session_id: str = Field(min_length=1, max_length=256)
     events: list[EventInput] = Field(min_length=1, max_length=500)
     metadata: dict = Field(default_factory=dict)
+    related_sessions: list[RelatedSession] = Field(default_factory=list, max_length=32)
+    temporary: bool = False
+    parent_sessions: list[RelatedSession] = Field(default_factory=list, max_length=8)
 
     @field_validator("metadata")
     @classmethod

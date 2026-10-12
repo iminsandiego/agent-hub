@@ -20,7 +20,7 @@ from starlette.staticfiles import StaticFiles
 from . import __version__
 from .auth import AuthStore, Principal
 from .config import ServerSettings, load_settings
-from .models import IngestInput, MemoryInput, ProjectInput, ReviewInput
+from .models import IngestInput, MemoryInput, ProjectInput, ReviewInput, SessionPrivacyInput
 from .paging import event_page, session_page, bounded_result
 from .store import Store
 
@@ -276,6 +276,13 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
     async def session(project: str, record_id: str, offset: int = Query(default=0, ge=0),
                       limit: int = Query(default=20, ge=1, le=100)):
         return await memory_get(project, "session", record_id, offset, limit)
+
+    @app.post("/v1/projects/{project}/sessions/{record_id}/privacy")
+    async def session_privacy(project: str, record_id: str, value: SessionPrivacyInput):
+        principal = authorize(project, "admin")
+        if not principal.admin:
+            raise PermissionError("Administrative token required")
+        return await run(store.set_session_privacy, project, record_id, value.mode)
 
     @app.get("/v1/projects/{project}/nodes/{node_id}")
     async def node(project: str, node_id: str):

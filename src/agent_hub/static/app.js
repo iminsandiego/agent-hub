@@ -50,6 +50,19 @@ async function showMemory(id) {
 async function showSession(id, offset = 0) {
   const value = await api(base() + "/sessions/" + encodeURIComponent(id) + "?offset=" + offset + "&limit=20");
   const nodes = [el("p", "detail-note", "Session " + id + ". Event previews are bounded; open an event for complete pages.")];
+  nodes.push(el("p", "detail-note", value.client + " · " + value.machine + " · " + value.external_id));
+  if (state.admin) {
+    const actions = el("div", "detail-actions");
+    const exclude = async (mode) => {
+      const label = mode === "temporary" ? "Make this chat temporary" : "Forget this chat";
+      if (!window.confirm(label + "?\n\n" + value.client + " · " + value.machine + "\n" + value.external_id + "\n\nRemove this chat and its linked copies from Agent Hub, including source-linked notes. Future capture of these identities will stay excluded. Native chat files and old backups remain. This cannot be undone here.")) return;
+      const result = await api(base() + "/sessions/" + encodeURIComponent(id) + "/privacy", { method: "POST", body: JSON.stringify({mode}) });
+      $("detail-content").replaceChildren(); $("detail").close();
+      notice("Chat " + result.mode + ". Watchers will not save it again."); await render();
+    };
+    actions.append(button("Make temporary", () => exclude("temporary")), button("Forget this chat", () => exclude("forgotten")));
+    nodes.push(actions);
+  }
   for (const event of value.events) { const card = el("div", "record"); card.append(meta(event), el("p", "", event.text), button("Open source →", () => showEvent(event.id))); nodes.push(card); }
   if (value.next_offset !== null) nodes.push(button("Next 20 records →", () => showSession(id, value.next_offset)));
   detail("Captured session", nodes);
@@ -77,6 +90,7 @@ async function searchView(parent) {
   for (const result of results) { const card = el("div", "record"); card.append(meta(result), el("p", "", result.excerpt || result.statement || result.text || ""), button("Open source →", () => result.type === "memory" ? showMemory(result.id) : showEvent(result.id))); parent.append(card); }
 }
 async function sessionsView(parent) {
+  parent.append(el("p", "subtle", "For a new temporary chat, start your first message with [temp]. To forget a saved chat, inspect it and choose Forget this chat with your administrator access."));
   const records = await api(base() + "/sessions?limit=100");
   if (!records.length) empty(parent, "No captured sessions yet.", "Connect a computer and run its capture watcher, or backfill a selected transcript.");
   for (const record of records) { const card = el("div", "record"); card.append(meta(record), el("h3", "", (record.client || "Agent") + " · " + (record.machine || "Execution host")), el("p", "", record.external_id || record.external_session_id || record.id), button("Inspect session →", () => showSession(record.id))); parent.append(card); }

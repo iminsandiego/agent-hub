@@ -198,3 +198,23 @@ The following remain unexecuted or pending:
 - GitHub repository creation/push and a successful remote CI run. The connection verified `iminsandiego`, but returned no accessible repositories/installations and exposed no repository-creation action. The exact target lookup returned 404; it does not establish whether an inaccessible private repository exists. Browser creation and diagnostic attempts timed out. Publication is blocked; no successful remote push is claimed.
 
 No actual personal logs were imported during these checks. Follow the target-host acceptance steps in [SERVER_SETUP.md](SERVER_SETUP.md) and the native-client checks in [CLIENTS.md](CLIENTS.md) before relying on capture from a particular computer. The executed results support an initial tested implementation, not a blanket production-readiness claim.
+
+## Version 0.1.6 privacy and backfill, October 12, 2026
+
+macOS Python 3.12: `PYTHONPATH=src python -m pytest -q` passed **285 tests**,
+one upstream Starlette warning, 4.38 seconds. New synthetic tests exercise
+prefix exclusion before storage, replay after checkpoint loss, late T3/native
+aliases, child inheritance without parent/sibling deletion, real authorization,
+source-linked note/index/tree purge, stable surviving IDs, restore with current
+policy, crash between ledger commit and purge, concurrent replay, in-flight
+semantic work, cache scrubbing, large raw records and bounded streaming import.
+Streaming fixtures preserve raw bytes/ordinals and resume after an outage;
+malformed or rewritten sources remain visible.
+
+Local headless Chrome browser smoke passed **15 checks**, including cancel and
+confirm Forget this chat, source-linked note removal, source inspection, literal
+hostile text, mobile layout and no persistent browser credentials. Synthetic
+fixture only; the screenshot was visually inspected. The local runner reads its
+private fixture credential directly; no production credential was sent to a
+browser connector. The package build and JavaScript syntax check passed. Target
+installation/backfill evidence is recorded separately after deployment.

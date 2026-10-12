@@ -41,6 +41,21 @@ async function main() {
     await page.getByText("No candidate notes.", { exact: true }).waitFor();
     await page.getByLabel("Memory status").selectOption("active");
     await page.getByRole("heading", { name: "Decision: route native clients to the same scoped service on the execution host.", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Captured sessions" }).click();
+    await page.getByRole("button", { name: "Inspect session →" }).click();
+    await page.getByRole("button", { name: "Forget this chat", exact: true }).waitFor();
+    await page.screenshot({ path: path.join(output, "forget-chat.png"), fullPage: true });
+    page.once("dialog", dialog => dialog.dismiss());
+    await page.getByRole("button", { name: "Forget this chat", exact: true }).click();
+    assert.equal(await page.locator("dialog[open]").count(), 1);
+    page.once("dialog", async dialog => {
+      assert(dialog.message().includes("fixture-session"));
+      await dialog.accept();
+    });
+    await page.getByRole("button", { name: "Forget this chat", exact: true }).click();
+    await page.getByText("No captured sessions yet.", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Review notes" }).click();
+    await page.getByText("No active notes.", { exact: true }).waitFor();
     await page.getByRole("button", { name: "Integrations" }).click();
     await page.getByText("memory", { exact: true }).waitFor();
     await page.getByRole("button", { name: "Overview", exact: false }).click();
@@ -56,7 +71,7 @@ async function main() {
     await page.getByLabel("Connect with your access token").waitFor();
     assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ browser_smoke: "passed", desktop: "1440x1000", mobile: "390x844", checks: ["login", "overview counts", "search", "source inspection", "session inspection", "XSS literal rendering", "candidate activation", "catalog", "project switch", "mobile overflow", "disconnect", "no persistent browser credentials", "no browser exceptions"], screenshots: output }));
+    console.log(JSON.stringify({ browser_smoke: "passed", desktop: "1440x1000", mobile: "390x844", checks: ["login", "overview counts", "search", "source inspection", "session inspection", "XSS literal rendering", "candidate activation", "cancel forget preserves chat", "confirmed forget removes chat and notes", "catalog", "project switch", "mobile overflow", "disconnect", "no persistent browser credentials", "no browser exceptions"], screenshots: output }));
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

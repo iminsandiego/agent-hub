@@ -309,15 +309,14 @@ def test_state_is_separate_for_other_server(cfg):
     assert LocalState(cfg).status()["pending_jobs"] == 0
 
 
-def test_context_cache_fallback_is_bounded_and_auth_failure_does_not_use_it(cfg, tmp_path):
+def test_live_context_is_bounded_and_offline_never_reinjects_forgotten_cache(cfg, tmp_path):
     payload = {"cwd": str(tmp_path / "work")}
     online = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"text": "history\n" * 5000})))
     result = hook_context(cfg, payload, budget_chars=400, memory=online)
     assert len(result["hookSpecificOutput"]["additionalContext"]) <= 400
     offline = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
     result = hook_context(cfg, payload, budget_chars=400, memory=offline)
-    assert "Cached" in result["hookSpecificOutput"]["additionalContext"]
-    assert len(result["hookSpecificOutput"]["additionalContext"]) <= 400
+    assert result == {}
     denied = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: httpx.Response(403, json={})))
     with pytest.raises(ServiceError):
         hook_context(cfg, payload, memory=denied)

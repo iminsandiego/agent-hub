@@ -62,6 +62,8 @@ def configure(args: argparse.Namespace) -> int:
         domain=args.domain or (existing.domain if existing else None),
         allowed_projects=args.allow_project if args.allow_project is not None else (existing.allowed_projects if existing else []),
         strict_scope=args.strict_scope or (existing.strict_scope if existing else False),
+        t3_database=args.t3_database or (existing.t3_database if existing else None),
+        codex_database=args.codex_database or (existing.codex_database if existing else None),
     )
     # Validate the entire prospective configuration before rotating a credential.
     # An invalid URL or project mapping must leave a working installation intact.
@@ -313,6 +315,8 @@ def register_commands(subparsers) -> None:
     configure_parser.add_argument("--map", action="append", metavar="PATH=PROJECT")
     configure_parser.add_argument("--capture-path", action="append")
     configure_parser.add_argument("--state-dir")
+    configure_parser.add_argument("--t3-database", help="T3 execution-host database for provider identity linking")
+    configure_parser.add_argument("--codex-database", help="Optional local Codex title database for named-chat discovery")
     configure_parser.add_argument("--domain", choices=["home", "work"])
     configure_parser.add_argument("--allow-project", action="append", help="Replace the profile project allowlist; repeat for every allowed project")
     configure_parser.add_argument("--strict-scope", action="store_true", help="Require mapped source cwd evidence throughout each transcript")
@@ -360,7 +364,7 @@ def register_commands(subparsers) -> None:
     hook_parser = subparsers.add_parser("hook", help="Read a native hook JSON payload from stdin")
     hook_parser.add_argument("--client", choices=["codex", "claude"], required=True)
     hook_parser.set_defaults(func=hook)
-    context_parser = subparsers.add_parser("context", help="Load project context and refresh its local startup cache")
+    context_parser = subparsers.add_parser("context", help="Load live project context")
     context_parser.add_argument("--project")
     context_parser.add_argument("--cwd")
     context_parser.add_argument("--budget-chars", type=int, default=8000)

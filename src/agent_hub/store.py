@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .tree import SUMMARY_BYTES, event_source, make_leaf, merge_nodes, node_id
+from .privacy import PrivacyLedger, temporary_message
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _STATUSES = {"candidate", "active", "rejected", "superseded"}
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -128,6 +129,14 @@ CREATE TABLE IF NOT EXISTS tree_nodes (
     FOREIGN KEY(right_id, project) REFERENCES tree_nodes(id, project)
 );
 CREATE INDEX IF NOT EXISTS tree_project_mode ON tree_nodes(project, mode, hi, lo)
+;
+CREATE TABLE IF NOT EXISTS erased_sequences (
+    project TEXT NOT NULL REFERENCES projects(id), sequence INTEGER NOT NULL,
+    PRIMARY KEY(project,sequence)
+);
+CREATE TABLE IF NOT EXISTS privacy_revisions (
+    project TEXT PRIMARY KEY REFERENCES projects(id), revision INTEGER NOT NULL DEFAULT 0
+)
 """
 
 
@@ -160,7 +169,7 @@ def _excerpt(text: str, maximum: int = 1000) -> str:
 
 
 class Store:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, *, privacy_path: Path | str | None = None):
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         was_present = self.path.exists()
@@ -215,6 +224,14 @@ class Store:
                 raise
         if not was_present and os.name == "posix":
             os.chmod(self.path, 0o600)
+        self.privacy = PrivacyLedger(Path(privacy_path).expanduser().resolve() if privacy_path else Path(str(self.path) + ".privacy.sqlite3"))
+        # Also replay after an old archive is restored, or a crash occurred
+        # between durable policy recording and content removal.
+        exclusions = self.privacy.exclusions()
+        with self._connection(write=True) as con:
+            for project in {e["project"] for e in exclusions}:
+                if con.execute("SELECT 1 FROM projects WHERE id=?", (project,)).fetchone():
+                    self._purge(con, project, [e["id"] for e in exclusions if e["project"] == project])
 
     @contextmanager
     def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -222,6 +239,7 @@ class Store:
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA busy_timeout=30000")
+        con.execute("PRAGMA secure_delete=ON")
         try:
             # Read operations also use one snapshot, including their follow-up
             # source lookups; concurrent review/ingest cannot produce mixtures.
@@ -298,6 +316,9 @@ class Store:
         session_id: str,
         events: list[dict[str, Any]],
         metadata: dict[str, Any] | None = None,
+        related_sessions: list[dict[str, str]] | None = None,
+        temporary: bool = False,
+        parent_sessions: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         for name, value in (("project", project), ("client", client), ("machine", machine), ("session_id", session_id)):
             _text(value, name)
@@ -323,8 +344,36 @@ class Store:
             payload_hash = _hash([role, text, raw, timestamp])
             normalized.append((external_id, role, text, raw, timestamp, payload_hash))
         internal_session = "s_" + _hash([project, client, machine, session_id])
+        if not isinstance(temporary, bool):
+            raise ValueError("temporary must be a boolean")
+        aliases = []
+        if related_sessions is not None and (not isinstance(related_sessions, list) or len(related_sessions) > 32):
+            raise ValueError("At most 32 related session identities are allowed")
+        for alias in related_sessions or []:
+            if not isinstance(alias, dict) or set(alias) != {"client", "session_id"}:
+                raise ValueError("Related sessions require client and session_id")
+            if alias["client"] not in {"codex", "claude", "t3", "generic", "chatgpt"}:
+                raise ValueError("Invalid related client")
+            _text(alias["session_id"], "related session_id")
+            aliases.append("s_" + _hash([project, alias["client"], machine, alias["session_id"]]))
+        parents = []
+        if parent_sessions is not None and (not isinstance(parent_sessions, list) or len(parent_sessions) > 8):
+            raise ValueError("At most 8 parent sessions are allowed")
+        for parent in parent_sessions or []:
+            if not isinstance(parent, dict) or set(parent) != {"client", "session_id"} or parent["client"] not in {"codex", "claude", "t3", "generic", "chatgpt"}:
+                raise ValueError("Invalid parent session")
+            _text(parent["session_id"], "parent session_id")
+            parents.append("s_" + _hash([project, parent["client"], machine, parent["session_id"]]))
         with self._connection(write=True) as con:
             project_row = self._project(con, project)
+            mode, group = self.privacy.observe(project, internal_session, aliases,
+                                               "temporary" if temporary or temporary_message(events) else None, parents)
+            if mode:
+                removed = self._purge(con, project, group)
+                return {"session_id": internal_session, "inserted": 0, "duplicates": 0,
+                        "event_ids": [], "total_events": 0, "suppressed": mode,
+                        "discarded": len(events), "removed_events": removed,
+                        "project_total_events": con.execute("SELECT count(*) FROM events WHERE project=?", (project,)).fetchone()[0]}
             existing = con.execute(
                 "SELECT * FROM sessions WHERE project=? AND id=?", (project, internal_session)
             ).fetchone()
@@ -376,8 +425,56 @@ class Store:
             ).fetchone()[0]
             return {
                 "session_id": internal_session, "inserted": inserted, "duplicates": duplicates,
-                "event_ids": event_ids, "total_events": total, "project_total_events": next_sequence,
+                "event_ids": event_ids, "total_events": total, "project_total_events": con.execute("SELECT count(*) FROM events WHERE project=?", (project,)).fetchone()[0],
             }
+
+    def set_session_privacy(self, project: str, session_id: str, mode: str) -> dict[str, Any]:
+        if mode not in {"temporary", "forgotten"}:
+            raise ValueError("mode must be temporary or forgotten")
+        with self._connection(write=True) as con:
+            self._project(con, project)
+            if not con.execute("SELECT 1 FROM sessions WHERE project=? AND id=?", (project, session_id)).fetchone() and not any(
+                e["id"] == session_id for e in self.privacy.exclusions(project)
+            ):
+                raise KeyError("Session not found in this project")
+            selected, group = self.privacy.observe(project, session_id, [], mode)
+            removed = self._purge(con, project, group)
+            return {"project": project, "session_id": session_id, "mode": selected,
+                    "linked_identities": len(group), "removed_events": removed}
+
+    @staticmethod
+    def _privacy_revision(con: sqlite3.Connection, project: str) -> int:
+        row = con.execute("SELECT revision FROM privacy_revisions WHERE project=?", (project,)).fetchone()
+        return row[0] if row else 0
+
+    def _purge(self, con: sqlite3.Connection, project: str, identifiers: list[str]) -> int:
+        con.execute("CREATE TEMP TABLE IF NOT EXISTS purge_ids(id TEXT PRIMARY KEY)")
+        con.execute("DELETE FROM purge_ids")
+        con.executemany("INSERT OR IGNORE INTO purge_ids VALUES(?)", [(i,) for i in identifiers])
+        count = con.execute("SELECT count(*) FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,)).fetchone()[0]
+        if not con.execute("SELECT 1 FROM sessions WHERE project=? AND id IN (SELECT id FROM purge_ids)", (project,)).fetchone():
+            return 0
+        con.execute("CREATE TEMP TABLE IF NOT EXISTS purge_memories(id TEXT PRIMARY KEY)")
+        con.execute("DELETE FROM purge_memories")
+        con.execute("INSERT INTO purge_memories SELECT DISTINCT memory_id FROM memory_sources WHERE project=? AND event_id IN (SELECT id FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids))", (project, project))
+        if self.fts_enabled:
+            con.execute("DELETE FROM history_fts WHERE project=? AND ((item_type='memory' AND item_id IN (SELECT id FROM purge_memories)) OR (item_type='event' AND item_id IN (SELECT id FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids))))", (project, project))
+        con.execute("UPDATE memories SET supersedes=NULL WHERE project=? AND supersedes IN (SELECT id FROM purge_memories)", (project,))
+        con.execute("UPDATE memories SET superseded_by=NULL WHERE project=? AND superseded_by IN (SELECT id FROM purge_memories)", (project,))
+        con.execute("DELETE FROM memory_reviews WHERE project=? AND (memory_id IN (SELECT id FROM purge_memories) OR related_memory_id IN (SELECT id FROM purge_memories))", (project,))
+        for table in ("memory_keys", "memory_sources"):
+            con.execute(f"DELETE FROM {table} WHERE project=? AND memory_id IN (SELECT id FROM purge_memories)", (project,))
+        con.execute("DELETE FROM memories WHERE project=? AND id IN (SELECT id FROM purge_memories)", (project,))
+        con.execute("DELETE FROM tree_nodes WHERE project=?", (project,))
+        con.execute("INSERT OR IGNORE INTO erased_sequences SELECT project,sequence FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
+        con.execute("DELETE FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
+        con.execute("DELETE FROM sessions WHERE project=? AND id IN (SELECT id FROM purge_ids)", (project,))
+        con.execute("INSERT INTO privacy_revisions VALUES(?,1) ON CONFLICT(project) DO UPDATE SET revision=revision+1", (project,))
+        self._rebuild_tree(con, project)
+        # FTS segments can retain obsolete postings until merged.
+        if self.fts_enabled:
+            con.execute("INSERT INTO history_fts(history_fts) VALUES('optimize')")
+        return count
 
     def get_event(self, project: str, event_id: str) -> dict[str, Any]:
         with self._read() as con:
@@ -428,7 +525,7 @@ class Store:
         _limit(limit, "limit")
         with self._read() as con:
             self._project(con, project)
-            return [self._event(row) for row in con.execute(
+            return [{**self._event(row), "privacy_revision": self._privacy_revision(con, project)} for row in con.execute(
                 "SELECT * FROM events WHERE project=? AND sequence>? ORDER BY sequence LIMIT ?",
                 (project, after_sequence, limit),
             )]
@@ -521,6 +618,7 @@ class Store:
         self, project: str, statement: str, kind: str = "observation",
         source_event_ids: list[str] | None = None, created_by: str = "manual",
         idempotency_key: str | None = None,
+        expected_privacy_revision: int | None = None,
     ) -> dict[str, Any]:
         _text(statement, "statement")
         _text(kind, "kind")
@@ -533,6 +631,8 @@ class Store:
         identity = _hash([statement, kind, sources])
         with self._connection(write=True) as con:
             self._project(con, project)
+            if expected_privacy_revision is not None and expected_privacy_revision != self._privacy_revision(con, project):
+                raise ValueError("Privacy changed while extracting memory; retrieve fresh sources")
             for source in sources:
                 if con.execute("SELECT 1 FROM events WHERE project=? AND id=?", (project, source)).fetchone() is None:
                     raise KeyError("Source event not found in this project")
@@ -681,22 +781,25 @@ class Store:
                 result["event"] = self._event(event)
             return result
 
+    def _rebuild_tree(self, con: sqlite3.Connection, project: str) -> dict[str, Any]:
+        project_row = self._project(con, project)
+        con.execute("DELETE FROM tree_nodes WHERE project=?", (project,))
+        count = actual = 0
+        rows = con.execute("SELECT sequence,text,id,role FROM events WHERE project=? UNION ALL SELECT sequence,'Excluded source omitted',NULL,'system' FROM erased_sequences WHERE project=? ORDER BY sequence", (project, project))
+        for event in rows:
+            if event["sequence"] != count:
+                raise RuntimeError("Archived sequence is missing an event or erasure marker")
+            self._append_tree(con, project, count, event["text"], event["id"], event["role"])
+            count += 1
+            actual += int(event["id"] is not None)
+        if count != project_row["next_sequence"]:
+            raise RuntimeError("Project sequence counter does not match archived history")
+        nodes = con.execute("SELECT count(*) FROM tree_nodes WHERE project=?", (project,)).fetchone()[0]
+        return {"project": project, "events": actual, "nodes": nodes, "semantic_summaries_reset": True}
+
     def rebuild_tree(self, project: str) -> dict[str, Any]:
         with self._connection(write=True) as con:
-            project_row = self._project(con, project)
-            # A single statement removes the whole self-referencing forest;
-            # SQLite checks its foreign keys at the statement boundary.
-            con.execute("DELETE FROM tree_nodes WHERE project=?", (project,))
-            count = 0
-            for event in con.execute("SELECT * FROM events WHERE project=? ORDER BY sequence", (project,)):
-                if event["sequence"] != count:
-                    raise RuntimeError("Archived events are not a contiguous sequence")
-                self._append_tree(con, project, count, event["text"], event["id"], event["role"])
-                count += 1
-            if count != project_row["next_sequence"]:
-                raise RuntimeError("Project sequence counter does not match archived history")
-            nodes = con.execute("SELECT count(*) FROM tree_nodes WHERE project=?", (project,)).fetchone()[0]
-            return {"project": project, "events": count, "nodes": nodes, "semantic_summaries_reset": True}
+            return self._rebuild_tree(con, project)
 
     def context(self, project: str, budget_chars: int = 12000, query: str | None = None) -> dict[str, Any]:
         _limit(budget_chars, "budget_chars", minimum=0, maximum=1000000)
@@ -768,7 +871,7 @@ class Store:
                 "project": project, "text": text, "char_count": len(text), "budget_chars": budget_chars,
                 "truncated": truncated, "active_memory_ids": included["memory"],
                 "event_ids": included["event"], "node_ids": included["node"],
-                "total_events": project_row["next_sequence"], "trust": "untrusted_historical_data",
+                "total_events": con.execute("SELECT count(*) FROM events WHERE project=?", (project,)).fetchone()[0], "trust": "untrusted_historical_data",
             }
 
     def _source(self, con: sqlite3.Connection, project: str, node: dict[str, Any]) -> tuple[str, str, bool]:
@@ -776,7 +879,7 @@ class Store:
             event = con.execute("SELECT id,role,text,payload_hash FROM events WHERE project=? AND id=?", (project, node["event_id"])).fetchone()
             if event is None:
                 raise RuntimeError("Tree leaf source is missing")
-            return event_source(event["text"], event["role"]), _hash(["leaf", event["id"], event["payload_hash"]]), True
+            return event_source(event["text"], event["role"]), _hash(["leaf", event["id"], event["payload_hash"], self._privacy_revision(con, project)]), True
         children = []
         for identifier in node["children"]:
             row = con.execute("SELECT * FROM tree_nodes WHERE project=? AND id=?", (project, identifier)).fetchone()
@@ -784,7 +887,7 @@ class Store:
                 raise RuntimeError("Tree child source is missing")
             children.append(self._node(row))
         source_text = "\n\n".join(child["summary"] for child in children)
-        source_hash = _hash([[child["id"], child["summary"], child["mode"], child["original_verbatim"]] for child in children])
+        source_hash = _hash([self._privacy_revision(con, project), [[child["id"], child["summary"], child["mode"], child["original_verbatim"]] for child in children]])
         return source_text, source_hash, all(child["original_verbatim"] for child in children)
 
     def _preceding_context(self, con: sqlite3.Connection, project: str, before: int) -> str:
@@ -880,7 +983,8 @@ class Store:
         with self._read() as con:
             project_row = self._project(con, project)
             return {
-                "project": project, "events": project_row["next_sequence"],
+                "project": project, "events": con.execute("SELECT count(*) FROM events WHERE project=?", (project,)).fetchone()[0],
+                "privacy_revision": self._privacy_revision(con, project),
                 "sessions": con.execute("SELECT count(*) FROM sessions WHERE project=?", (project,)).fetchone()[0],
                 "memories": {row["status"]: row["total"] for row in con.execute("SELECT status,count(*) AS total FROM memories WHERE project=? GROUP BY status", (project,))},
                 "tree_nodes": con.execute("SELECT count(*) FROM tree_nodes WHERE project=?", (project,)).fetchone()[0],
@@ -891,8 +995,8 @@ class Store:
 
     def backup(self, destination: Path | str) -> dict[str, Any]:
         target = Path(destination).expanduser().resolve()
-        if target == self.path:
-            raise ValueError("Backup destination cannot be the live database")
+        if target in {self.path, self.privacy.path} or Path(str(target) + ".privacy.sqlite3") in {self.path, self.privacy.path}:
+            raise ValueError("Backup destination cannot be a live database or privacy ledger")
         if target.exists() and (target.is_dir() or os.path.samefile(target, self.path)):
             raise ValueError("Invalid backup destination")
         if Path(str(target) + "-wal").exists() or Path(str(target) + "-shm").exists():
@@ -922,6 +1026,8 @@ class Store:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-            return {"destination": str(target), "size_bytes": target.stat().st_size, "schema_version": SCHEMA_VERSION, "created_at": _now()}
+            privacy_target = Path(str(target) + ".privacy.sqlite3")
+            self.privacy.backup(privacy_target)
+            return {"destination": str(target), "privacy_ledger": str(privacy_target), "size_bytes": target.stat().st_size, "schema_version": SCHEMA_VERSION, "created_at": _now()}
         finally:
             temporary_path.unlink(missing_ok=True)

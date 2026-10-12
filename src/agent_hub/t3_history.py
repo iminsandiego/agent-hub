@@ -1,7 +1,7 @@
 """Read-only, restartable capture of T3's persisted orchestration event stream.
 
-This adapter targets T3 0.0.45's v1 SQLite event schema. It never reads auth,
-provider credentials, mutable provider runtime state, or writes T3's database.
+This adapter targets T3 0.0.45's v1 SQLite event schema. Privacy linking reads
+only provider name/thread IDs. It never reads auth or runtime payloads, or writes T3.
 """
 from __future__ import annotations
 
@@ -58,6 +58,10 @@ def sync_t3(config: ClientConfig, database: str | Path, checkpoint: str | Path,
     # A default or explicit project makes routing deliberate even when the
     # native event lacks cwd. Strict deployments should use their own profile.
     target = config.resolve_project(explicit=project)
+    from dataclasses import replace
+    # Use the source database for proven provider aliases, including custom
+    # profiles. Keep the passed-in configuration unchanged.
+    config = replace(config, t3_database=str(source))
     identity = {'schema_version': 1, 'source': str(source), 'url': config.url,
                 'machine': config.machine_id, 'project': target}
     state = {**identity, 'sequence': 0, 'event_id': None}

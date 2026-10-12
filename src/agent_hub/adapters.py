@@ -79,6 +79,8 @@ class Transcript:
     complete_lines: int = 0
     unknown_types: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    parent_session_id: str | None = None
+    temporary: bool = False
     observed_cwds: list[str] = field(default_factory=list)
 
 
@@ -158,6 +160,7 @@ def parse_jsonl(
     session_id: str | None = None,
     cwd: str | None = None,
     final: bool = False,
+    start_line: int = 0,
 ) -> Transcript:
     """Parse complete records, preserving raw JSON text exactly.
 
@@ -171,7 +174,7 @@ def parse_jsonl(
     complete_lines = 0
     pending = 0
     errors: list[str] = []
-    for ordinal, line in enumerate(data.splitlines(keepends=True), start=1):
+    for ordinal, line in enumerate(data.splitlines(keepends=True), start=start_line + 1):
         terminated = line.endswith(b"\n")
         if not terminated and not final:
             pending = len(line)
@@ -186,7 +189,7 @@ def parse_jsonl(
                 item = json.loads(text[1:])
             elif not text.strip():
                 offset += len(line)
-                complete_lines = ordinal
+                complete_lines = ordinal - start_line
                 continue
             else:
                 item = json.loads(text)
@@ -196,10 +199,10 @@ def parse_jsonl(
                 break
             errors.append(f"line {ordinal}: {type(exc).__name__}")
             offset += len(line)
-            complete_lines = ordinal
+            complete_lines = ordinal - start_line
             continue
         offset += len(line)
-        complete_lines = ordinal
+        complete_lines = ordinal - start_line
         records.append((ordinal, offset, text, item))
     if errors:
         raise AdapterError("Malformed complete transcript records: " + "; ".join(errors[:20]))
@@ -244,6 +247,14 @@ def parse_jsonl(
     )
     if parent_session:
         result.metadata["parent_session_id"] = parent_session
+        result.parent_session_id = parent_session
+    if client == "codex":
+        for _, _, _, record in records:
+            if isinstance(record, dict) and record.get("type") == "session_meta":
+                payload = record.get("payload", {})
+                if isinstance(payload, dict) and isinstance(payload.get("parent_thread_id"), str):
+                    result.parent_session_id = payload["parent_thread_id"]
+
     unknown: set[str] = set()
     for ordinal, end, raw, item in records:
         # Inspect only native metadata fields, never recursively interpret quoted

@@ -132,17 +132,31 @@ def restore(args):
             raise ValueError("Backup integrity check failed")
         if not connection.execute("SELECT 1 FROM sqlite_master WHERE name='projects'").fetchone():
             raise ValueError("This is not an Agent Hub memory backup")
+    if not args.privacy_ledger:
+        raise ValueError("Restore requires --privacy-ledger pointing to the CURRENT exclusion ledger, not an old backup copy")
+    ledger_source = Path(args.privacy_ledger).expanduser().resolve()
+    with closing(sqlite3.connect(ledger_source.as_uri() + "?mode=ro", uri=True)) as ledger:
+        if ledger.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or not ledger.execute("SELECT 1 FROM sqlite_master WHERE name='identities'").fetchone():
+            raise ValueError("Invalid privacy ledger")
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ledger_target = Path(str(settings.database) + ".privacy.sqlite3")
+    if ledger_target.exists():
+        raise ValueError("Restore will not overwrite an existing privacy ledger")
     write_private(settings.database, "")
     try:
         with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as src:
             with closing(sqlite3.connect(settings.database)) as target:
+                src.backup(target)
+        write_private(ledger_target, "")
+        with closing(sqlite3.connect(ledger_source.as_uri() + "?mode=ro", uri=True)) as src:
+            with closing(sqlite3.connect(ledger_target)) as target:
                 src.backup(target)
         store = Store(settings.database)
         output({"restored": str(settings.database), "projects": store.list_projects(),
                 "next": "Run init-server to create fresh administrative credentials; restored projects will be retained"})
     except BaseException:
         settings.database.unlink(missing_ok=True)
+        ledger_target.unlink(missing_ok=True)
         raise
 
 
@@ -218,6 +232,7 @@ def register_commands(subparsers):
     restore_parser = subparsers.add_parser("restore", help="Restore memory into an empty server data directory")
     common(restore_parser)
     restore_parser.add_argument("--source", required=True)
+    restore_parser.add_argument("--privacy-ledger", help="Required current exclusion ledger; prevents restoration of forgotten chats")
     restore_parser.set_defaults(func=restore)
     rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild lossy summary cache from original records")
     common(rebuild_parser)

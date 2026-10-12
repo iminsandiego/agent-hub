@@ -90,15 +90,8 @@ need version-specific, source-preserving adapters.
 
 ## Temporary chats and deletion
 
-Version 0.1.5 has no per-chat temporary mode or selective purge. Rejecting a
-candidate note does not erase its underlying transcript. Deleting a native/T3
-chat does not delete Agent Hub's archived copy. Watchers can import resumed files;
-backups and local caches may retain older copies.
-
-Recommended future controls are a temporary chat that may retrieve memory but
-does not ingest, and an explicit Forget this chat action. Exclusion must cover
-both T3 and native copies before capture. Forgetting must remove raw and indexed
-records, derived summaries/notes and caches, preserve a minimal non-content
-tombstone to prevent re-import, and define backup expiration/restore behavior.
-This design is not implemented or enabled. Do not assume a title, a request in
-chat or deleting the source creates a temporary chat. No history was deleted.
+Version 0.1.6 supports an explicit `[temp]` first-message prefix and administrator
+**Forget this chat** / **Make temporary** controls. Durable exclusions prevent
+watcher replay and historical backfill from restoring known chat identities.
+See [temporary chats and restore rules](TEMPORARY_CHATS.md). Native chat files,
+loaded model context and old backups are outside live archive deletion.
