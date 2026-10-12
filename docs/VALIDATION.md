@@ -201,7 +201,7 @@ No actual personal logs were imported during these checks. Follow the target-hos
 
 ## Version 0.1.6 privacy and backfill, October 12, 2026
 
-macOS Python 3.12: `PYTHONPATH=src python -m pytest -q` passed **285 tests**,
+macOS Python 3.12: `PYTHONPATH=src python -m pytest -q` passed **286 tests**,
 one upstream Starlette warning, 4.25 seconds. New synthetic tests exercise
 prefix exclusion before storage, replay after checkpoint loss, late T3/native
 aliases, child inheritance without parent/sibling deletion, real authorization,
@@ -220,3 +220,41 @@ browser connector. The package build and JavaScript syntax check passed. Target
 installation/backfill evidence is recorded separately after deployment.
 
 The full 286-test release gate passed again after a live large-archive test exposed a deletion stall. Forgetting now replaces only erased leaves and affected ancestors, with a regression asserting that unrelated semantic summaries survive and a full rebuild is not used. Package rebuild succeeded; backfill jobs yield to ordinary live capture. Target-server replay and complete inventory evidence follow below.
+
+
+### Deployed privacy and real T3 recall
+
+Mac Python3.12 and Debian13/VM Python3.13.5 installed0.1.6 with matching
+`store.py` SHA256 `c2471c0ca1416d69b187522af91b146ed39edbb9dcbc735da56e6b7cac1d5e9b`.
+Both installed dependency checks passed. The service, native watcher, T3 reader
+and backup timer were active after deployment. Only Agent Hub services were
+restarted; T3 and unrelated workloads remained running.
+
+A synthetic deployed HTTP/native-queue test passed temporary exclusion,
+forgetting both native and proven T3 copies, append and replay after lost local
+checkpoints, T3 replay exclusion, zero final test queue, and403 for administrative
+deletion attempted with ordinary harness credentials. Two synthetic records
+were purged; no user chat was deleted. The first large-archive deletion test timed
+out and blocked writes because full-tree removal was expensive. The affected-tree
+fix above was deployed; the same synthetic workflow then passed. Durable queues
+retained transient restart/lock errors for retry rather than dropping records.
+
+The missing named-chat source predates first watcher installation.
+It was last changed03:52:58Z; installation baseline at04:00:09Z excluded unchanged
+historical files. Backfill captured every byte and original record of that source.
+An attributed Codex name record points to the native session. MCP retrieval of
+the last records verified an earlier file-transfer discussion.
+
+A fresh real T3 Claude Opus5.5 chat (ID withheld),
+asked where that chat left off without a memory-lookup reminder. It used memory
+tools and returned that transfer's last recorded status and pending checksum
+verification, explicitly distinguishing historical state from current completion.
+The test started with `[temp]`. Read-only T3/source and archive comparisons found
+both its T3 and native Claude identities marked temporary, with **zero stored test
+events** in either identity. Native/T3 source transcripts remain in those clients.
+
+Private GitHub push was confirmed by matching remote/local main SHA
+`7298b7ef3693a505abebe6fc8b94e0c8333c7660`. All seven jobs passed in
+https://github.com/iminsandiego/agent-hub/actions/runs/38209299651:
+Python3.11/3.12 on Ubuntu, macOS and Windows, plus Docker build/CLI startup.
+The repository readback confirmed private visibility and administrator access.
