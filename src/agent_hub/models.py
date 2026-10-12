@@ -56,6 +56,10 @@ class MemoryInput(WireModel):
     idempotency_key: str | None = Field(default=None, max_length=256)
 
 
+class LoginInput(WireModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
 class ReviewInput(WireModel):
     status: Literal["active", "rejected"]
     supersedes: str | None = Field(default=None, max_length=128)

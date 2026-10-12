@@ -1,3 +1,27 @@
+## 0.1.8 browser password sign-in, October 12, 2026
+
+Linux, CPython 3.13.16: `PYTHONPATH=src python -m pytest -q` ran 309 tests, 308
+passed. The one failure, `test_client_against_real_authenticated_service_contract`,
+is the same environment-specific httpx mock-transport failure recorded for the
+previous commit. Fourteen new tests in `tests/test_browser_login.py` cover: refusal
+before a password is set; scrypt storage without the plaintext; wrong-password
+rejection; `HttpOnly`/`SameSite=Strict` cookies, `Secure` for HTTPS pages; admin
+REST access with the cookie; no MCP access with the cookie; cookie writes refused
+without an allowed `Origin`; sign-in refused without one; no fallback from an
+explicit bearer header; sign-out, password change, disable and expiry revoking
+sessions; throttling with `Retry-After`; per-port cookie names; and the
+`set-password` command's `--stdin` and `--disable` paths.
+
+`scripts/browser-smoke.cjs` passed 27 checks in headless Chromium 141 against
+`scripts/smoke_fixture.py` (synthetic data and a per-run synthetic password),
+directly and again through a local TCP forwarder on another port standing in for
+an SSH tunnel: wrong-password message, sign-in, session surviving reload, cookie
+unreadable from page script, review and forget over the session, sign-out staying
+signed out after reload, and the token fallback being dropped on reload, plus the
+earlier UI checks. The deployed home VM and the Mac tunnel were not exercised.
+
+---
+
 ## Memory browser redesign and tunnel origins, October 12, 2026
 
 The browser UI was rewritten (`src/agent_hub/static/`): project home, search with

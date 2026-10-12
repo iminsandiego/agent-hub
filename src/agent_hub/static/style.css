@@ -168,7 +168,11 @@ label, .label { display: block; font-weight: 600; font-size: 13px; margin: 14px 
 .server-check[data-state="error"] .dot { background: var(--danger); }
 .token-row { display: flex; gap: 8px; align-items: center; }
 .token-row input { flex: 1; font-family: var(--mono); font-size: 13px; }
-#connect-form .primary { margin-top: 14px; min-height: 42px; }
+.signin { margin-top: 4px; }
+.signin > input[type="password"] { width: 100%; }
+.signin .primary { margin-top: 14px; min-height: 42px; }
+.signin-note { margin: 10px 0 0; color: var(--faint); font-size: 12.5px; text-align: center; }
+.signin .link { display: block; margin: 12px auto 0; font-size: 13px; }
 .help { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; color: var(--muted); font-size: 13px; }
 .help summary { cursor: pointer; font-weight: 600; color: var(--text); }
 .help p { margin: 10px 0 0; }

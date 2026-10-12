@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from http.cookies import CookieError, SimpleCookie
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -20,11 +22,12 @@ from starlette.staticfiles import StaticFiles
 from . import __version__
 from .auth import AuthStore, Principal
 from .config import ServerSettings, load_settings
-from .models import IngestInput, MemoryInput, ProjectInput, ReviewInput, SessionPrivacyInput
+from .models import IngestInput, LoginInput, MemoryInput, ProjectInput, ReviewInput, SessionPrivacyInput
 from .paging import event_page, session_page, bounded_result
 from .store import Store
 
 principal_context: ContextVar[Principal | None] = ContextVar("agent_hub_principal", default=None)
+SESSION_COOKIE = "agent_hub_session"
 PROJECT_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
@@ -51,6 +54,42 @@ def same_origin(origin: str, host: str) -> bool:
         return (parsed.hostname.lower(), parsed.port or default) == (target.hostname.lower(), target.port or default)
     except ValueError:
         return False
+
+
+def cookie_name(host: str, secure: bool = False) -> str:
+    """Browsers share cookies across ports, so tunnels to home and work servers need distinct names."""
+    try:
+        port = urlsplit("//" + host).port
+    except ValueError:
+        port = None
+    return f"{SESSION_COOKIE}_{port or (443 if secure else 80)}"
+
+
+def session_cookie(headers: dict[str, str]) -> str:
+    try:
+        jar = SimpleCookie(headers.get("cookie", ""))
+    except CookieError:
+        return ""
+    host = headers.get("host", "")
+    morsel = jar.get(cookie_name(host)) or jar.get(cookie_name(host, secure=True))
+    return morsel.value if morsel else ""
+
+
+class LoginThrottle:
+    """Slow repeated wrong passwords. Tunnelled requests share one address, so this is global."""
+    def __init__(self, free_attempts: int = 5, max_delay: float = 900):
+        self.free, self.max_delay, self.failures, self.locked_until = free_attempts, max_delay, 0, 0.0
+
+    def retry_after(self) -> int:
+        return max(0, int(self.locked_until - time.monotonic() + 0.999))
+
+    def failed(self) -> None:
+        self.failures += 1
+        if self.failures >= self.free:
+            self.locked_until = time.monotonic() + min(self.max_delay, 2 ** (self.failures - self.free))
+
+    def succeeded(self) -> None:
+        self.failures, self.locked_until = 0, 0.0
 
 
 class GuardMiddleware:
@@ -82,6 +121,14 @@ class GuardMiddleware:
             scheme, _, token = headers.get("authorization", "").partition(" ")
             if scheme.lower() == "bearer":
                 principal = await anyio.to_thread.run_sync(self.auth.authenticate, token)
+            elif "authorization" not in headers and path.startswith("/v1") and session_cookie(headers):
+                # Browser sessions reach the REST API only, never MCP. A cookie rides along on
+                # any request to this host, so writes must prove they came from an allowed page.
+                if scope.get("method") not in {"GET", "HEAD"} and origin is None:
+                    await JSONResponse({"detail": "Browser session writes require an Origin header"},
+                                       status_code=403)(scope, receive, send)
+                    return
+                principal = await anyio.to_thread.run_sync(self.auth.session_principal, session_cookie(headers))
             if principal is None:
                 await JSONResponse({"detail": "Authentication required"}, status_code=401,
                                    headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
@@ -231,7 +278,45 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": __version__, "domain": settings.domain}
+        return {"status": "ok", "version": __version__, "domain": settings.domain,
+                "password_login": await run(auth.password_enabled)}
+
+    throttle = LoginThrottle()
+
+    @app.post("/auth/login")
+    async def login(value: LoginInput, request: Request):
+        origin = request.headers.get("origin")
+        if origin is None:
+            raise PermissionError("Sign-in must come from the Agent Hub page")
+        if not await run(auth.password_enabled):
+            raise PermissionError("Browser sign-in is not set up. Run agent-hub set-password on the server.")
+        wait = throttle.retry_after()
+        if wait:
+            return JSONResponse({"detail": f"Too many wrong passwords. Try again in {wait} seconds."},
+                                status_code=429, headers={"Retry-After": str(wait)})
+        if not await run(auth.check_password, value.password):
+            throttle.failed()
+            return JSONResponse({"detail": "That password isn’t right."}, status_code=401)
+        throttle.succeeded()
+        secret, expires = await run(auth.start_session)
+        response = JSONResponse({"signed_in": True, "expires_at": expires.isoformat()})
+        secure = origin.startswith("https://")
+        response.set_cookie(cookie_name(request.headers.get("host", ""), secure), secret, max_age=int((expires - expires.now(expires.tzinfo)).total_seconds()),
+                            path="/", httponly=True, samesite="strict", secure=secure)
+        return response
+
+    @app.post("/auth/logout")
+    async def logout(request: Request):
+        if request.headers.get("origin") is None:
+            raise PermissionError("Sign-out must come from the Agent Hub page")
+        host = request.headers.get("host", "")
+        secret = session_cookie({"cookie": request.headers.get("cookie", ""), "host": host})
+        if secret:
+            await run(auth.end_session, secret)
+        response = JSONResponse({"signed_in": False})
+        for secure in (False, True):
+            response.delete_cookie(cookie_name(host, secure), path="/", httponly=True, samesite="strict")
+        return response
 
     @app.get("/v1/projects")
     async def projects():

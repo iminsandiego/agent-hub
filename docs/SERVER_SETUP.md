@@ -30,7 +30,15 @@ Visit `http://127.0.0.1:8765` on the server, or establish an SSH tunnel from you
 ssh -L 8765:127.0.0.1:8765 YOUR_SERVER
 ```
 
-The browser at `http://127.0.0.1:8765` will then reach the service through SSH. Any free local port works, for example `ssh -L 18765:127.0.0.1:8765 YOUR_SERVER` and `http://127.0.0.1:18765`: the service accepts a browser `Origin` that names the same allowed host and port the request was sent to, so tunnelled pages can review notes and forget chats without listing every local port. The sign-in screen shows the server version and domain behind the address before you paste a token. Obtain the token from its private file on the server using your normal trusted administrative channel. An SSH tunnel also provides a simple initial client endpoint without publishing an HTTP service to the LAN.
+The browser at `http://127.0.0.1:8765` will then reach the service through SSH. Any free local port works, for example `ssh -L 18765:127.0.0.1:8765 YOUR_SERVER` and `http://127.0.0.1:18765`: the service accepts a browser `Origin` that names the same allowed host and port the request was sent to, so tunnelled pages can review notes and forget chats without listing every local port. The sign-in screen shows the server version and domain behind the address.
+
+Set the browser password once on the server (it prompts twice and never echoes):
+
+```bash
+.venv/bin/agent-hub set-password --server-config "$HOME/.local/share/agent-hub/server.json"
+```
+
+Then sign in at the browser with that password; you stay signed in on that browser for 30 days or until you sign out. Run the command again to change a forgotten password, which also signs out every browser, or pass `--disable` to turn password sign-in off. With Docker Compose, run `docker compose exec memory agent-hub set-password --data-dir /data`. A pasted token still works as a fallback (choose **Use an access token instead**); obtain one from its private file on the server using your normal trusted administrative channel. An SSH tunnel also provides a simple initial client endpoint without publishing an HTTP service to the LAN.
 
 ### Keep the service running
 
