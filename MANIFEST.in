@@ -1,0 +1,10 @@
+include requirements.lock NOTICE.md AGENTS.md CLAUDE.md .dockerignore .gitignore .gitattributes
+recursive-include docs *.md *.json *.png
+recursive-include deploy *
+recursive-include scripts *.sh *.ps1 *.py *.cjs
+recursive-include mcps *.md
+recursive-include plugins *.md
+recursive-include skills *.md
+recursive-include profiles *.md *.json
+recursive-include src/agent_hub/static *
+recursive-include .github *.yml

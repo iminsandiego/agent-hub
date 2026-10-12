@@ -1,0 +1,5 @@
+# Replace this placeholder with a hostname you control and have routed to the server.
+# Add the same exact hostname and HTTPS origin to server.json before using it.
+memory.your-domain.example {
+    reverse_proxy 127.0.0.1:8765
+}

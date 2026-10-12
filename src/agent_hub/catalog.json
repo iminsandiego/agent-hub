@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "memory",
+      "kind": "mcp",
+      "description": "Project-scoped durable history, search, summary navigation and candidate notes",
+      "status": "built-in",
+      "source": "agent_hub.client:stdio gateway; agent_hub.server:/mcp",
+      "clients": ["codex", "claude", "t3-provider"],
+      "credentials": ["per-machine Agent Hub token"]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "browser_smoke": "passed",
+  "desktop": "1440x1000",
+  "mobile": "390x844",
+  "checks": [
+    "login",
+    "overview counts",
+    "search",
+    "source inspection",
+    "session inspection",
+    "XSS literal rendering",
+    "candidate activation",
+    "catalog",
+    "project switch",
+    "mobile overflow",
+    "disconnect",
+    "no persistent browser credentials",
+    "no browser exceptions"
+  ],
+  "screenshots": "docs/evidence",
+  "browser_version": "Chromium 153.0.8010.0",
+  "data": "Synthetic fixture only; no personal transcripts"
+}

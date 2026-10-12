@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent Hub · Shared memory</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="mark">a<span>h</span></span><span>Agent Hub<small>Shared memory, with sources</small></span></a>
+      <div class="project-field"><label for="project">MEMORY PROJECT</label><select id="project" disabled><option>Connect to choose</option></select></div>
+      <nav aria-label="Main navigation">
+        <button class="nav active" data-view="overview"><span>◈</span> Overview</button>
+        <button class="nav" data-view="search"><span>⌕</span> Search memory</button>
+        <button class="nav" data-view="sessions"><span>≡</span> Captured sessions</button>
+        <button class="nav" data-view="review"><span>✓</span> Review notes</button>
+        <button class="nav" data-view="catalog"><span>⊞</span> Integrations</button>
+      </nav>
+      <div class="side-foot"><span class="status-dot"></span><span id="connection-status">Not connected</span><button id="disconnect" class="text-button" hidden>Disconnect</button></div>
+    </aside>
+    <main>
+      <header class="topbar"><span>YOUR AGENT WORKSPACE</span><span class="pill">Memory service · v0.1</span></header>
+      <section id="login" class="welcome">
+        <div class="eyebrow">CONTINUITY ACROSS COMPUTERS</div>
+        <h1>Your agents change.<br>Your knowledge stays.</h1>
+        <p>Find previous decisions, inspect their sources, and carry useful context into the next session.</p>
+        <form id="connect-form" class="connect-card">
+          <label for="token">Connect with your access token</label>
+          <div class="input-row"><input id="token" type="password" autocomplete="off" placeholder="Paste a scoped access token" required><button type="submit" class="primary">Connect <span>→</span></button></div>
+          <small>The token stays in this tab. Your project permissions apply to every view.</small>
+        </form>
+        <div class="welcome-grid"><div><b>01</b><h3>Capture</h3><p>Keep the original records from your work.</p></div><div><b>02</b><h3>Remember</h3><p>Review useful findings and decisions.</p></div><div><b>03</b><h3>Retrieve</h3><p>Follow every memory back to its source.</p></div></div>
+      </section>
+      <section id="workspace" hidden>
+        <div class="page-heading"><div><div class="eyebrow" id="scope-label">PROJECT MEMORY</div><h1 id="page-title">An overview of what stays.</h1></div><button class="secondary" id="refresh">Refresh ↻</button></div>
+        <p id="page-description" class="description"></p>
+        <div id="content" aria-live="polite"></div>
+      </section>
+      <div id="notice" role="status" hidden></div>
+    </main>
+  </div>
+  <dialog id="detail"><div class="dialog-head"><h2 id="detail-title">Source detail</h2><button id="close-detail" class="secondary" aria-label="Close details">Close ×</button></div><div id="detail-content"></div></dialog>
+</body>
+</html>

@@ -1,0 +1,317 @@
+import json
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+from agent_hub.store import SCHEMA_VERSION, Store
+
+
+@pytest.fixture
+def store(tmp_path):
+    result = Store(tmp_path / "memory.sqlite3")
+    result.create_project("alpha")
+    result.create_project("beta")
+    return result
+
+
+def event(identifier, text=None, **overrides):
+    item = {
+        "event_id": str(identifier),
+        "role": "user",
+        "text": text if text is not None else f"Event {identifier} controller",
+        "raw": '{"message": "exact JSON, spacing preserved", "i": ' + str(identifier) + '}\r\n',
+        "timestamp": "2026-10-07T12:00:00Z",
+    }
+    item.update(overrides)
+    return item
+
+
+def ingest(store, events, project="alpha", session="session", **kwargs):
+    return store.ingest(project, "codex", "machine", session, events, **kwargs)
+
+
+def test_raw_archive_and_retry_dedup_are_exact(store):
+    original = event(0, "A normalized view\n文")
+    first = ingest(store, [original], metadata={"cwd": "/repos/alpha"})
+    second = ingest(store, [original], metadata={"cwd": "/repos/alpha"})
+    assert first["event_ids"] == second["event_ids"]
+    assert (second["inserted"], second["duplicates"], second["total_events"]) == (0, 1, 1)
+    saved = store.get_event("alpha", first["event_ids"][0])
+    assert saved["raw"] == original["raw"]
+    assert saved["text"] == original["text"]
+    assert saved["timestamp"] == original["timestamp"]
+    assert saved["ingested_at"] != original["timestamp"]
+    assert saved["sequence"] == 0
+    assert json.dumps(saved)  # Public results contain only serializable values.
+
+
+def test_conflict_rolls_back_whole_batch_and_tree(store):
+    original = ingest(store, [event(0)])
+    before = store.view("alpha")
+    with pytest.raises(ValueError, match="conflicts"):
+        ingest(store, [event(1), event(0, "changed old payload")])
+    assert store.stats("alpha")["events"] == 1
+    assert store.view("alpha") == before
+    assert not store.search("alpha", "changed old payload")
+    retry = ingest(store, [event(1)])
+    assert store.get_event("alpha", retry["event_ids"][0])["sequence"] == 1
+    assert store.get_session("alpha", original["session_id"])["total"] == 2
+
+
+def test_duplicate_keys_within_batch_are_checked_transactionally(store):
+    result = ingest(store, [event(0), event(0)])
+    assert result["inserted"] == result["duplicates"] == 1
+    assert result["event_ids"][0] == result["event_ids"][1]
+    with pytest.raises(ValueError):
+        ingest(store, [event(0), event(0, "different")], session="other-session")
+    assert len(store.list_sessions("alpha")) == 1
+
+
+def test_metadata_is_immutable_but_an_unspecified_retry_is_allowed(store):
+    result = ingest(store, [event(0)], metadata={"cwd": "/alpha"})
+    ingest(store, [event(0)])
+    with pytest.raises(ValueError, match="metadata"):
+        ingest(store, [event(1)], metadata={"cwd": "/elsewhere"})
+    assert store.get_session("alpha", result["session_id"])["metadata"] == {"cwd": "/alpha"}
+    assert store.stats("alpha")["events"] == 1
+
+
+def test_all_reads_and_mutations_respect_project_scope(store):
+    alpha = ingest(store, [event(0, "alphasensitive")])
+    beta = ingest(store, [event(0, "betasensitive")], project="beta")
+    memory = store.add_memory("alpha", "alphamemory", source_event_ids=alpha["event_ids"])
+    assert alpha["session_id"] != beta["session_id"]
+    node = store.view("alpha")[0]
+    for operation in (
+        lambda: store.get_event("beta", alpha["event_ids"][0]),
+        lambda: store.get_session("beta", alpha["session_id"]),
+        lambda: store.get_memory("beta", memory["id"]),
+        lambda: store.review_memory("beta", memory["id"], "active"),
+        lambda: store.zoom("beta", node["id"]),
+        lambda: store.add_memory("beta", "stolen source", source_event_ids=alpha["event_ids"]),
+        lambda: store.complete_summary("beta", node["id"], "wrong", "wrong", "test"),
+    ):
+        with pytest.raises(KeyError):
+            operation()
+    assert not store.search("beta", "alphasensitive alphamemory")
+    assert "alphasensitive" not in store.context("beta")["text"]
+    assert all(session["project"] == "beta" for session in store.list_sessions("beta"))
+    assert [record["text"] for record in store.events_after("beta")] == ["betasensitive"]
+    store.rebuild_tree("beta")
+    assert store.get_event("alpha", alpha["event_ids"][0])["text"] == "alphasensitive"
+
+
+def test_missing_projects_are_not_implicitly_created(store):
+    for operation in (
+        lambda: ingest(store, [event(0)], project="missing"),
+        lambda: store.search("missing", "controller"),
+        lambda: store.context("missing"),
+        lambda: store.view("missing"),
+        lambda: store.stats("missing"),
+        lambda: store.events_after("missing"),
+        lambda: store.summary_tasks("missing"),
+    ):
+        with pytest.raises(KeyError):
+            operation()
+
+
+@pytest.mark.parametrize("query", ['"controller" OR *', 'NEAR(controller, 2)', "controller' ; DROP TABLE events;--", 'controller : ^ { } [ ] ( )', '""*', "文"])
+def test_search_input_is_literal_and_never_sql_or_fts_syntax(store, query):
+    result = ingest(store, [event(0, "controller 文")])
+    matches = store.search("alpha", query)
+    assert all(match["project"] == "alpha" for match in matches)
+    assert store.get_event("alpha", result["event_ids"][0])["text"] == "controller 文"
+
+
+def test_search_includes_candidate_provenance_and_excludes_rejected_notes(store):
+    archived = ingest(store, [event(0, "controller response source")])
+    note = store.add_memory("alpha", "controller response note", source_event_ids=archived["event_ids"])
+    matches = store.search("alpha", "controller")
+    assert {match["type"] for match in matches} == {"event", "memory"}
+    assert next(match for match in matches if match["type"] == "memory")["source_event_ids"] == archived["event_ids"]
+    store.review_memory("alpha", note["id"], "rejected")
+    assert {match["type"] for match in store.search("alpha", "controller")} == {"event"}
+
+
+def test_fallback_search_is_explicit_and_handles_wildcards_as_data(store):
+    ingest(store, [event(0, "literal_under controller")])
+    store.fts_enabled = False
+    assert store.search("alpha", "controller")[0]["retrieval"] == "substring_fallback"
+    assert not store.search("alpha", "different_under")
+    assert store.stats("alpha")["search_backend"] == "substring_fallback"
+
+
+def test_actual_concurrent_ingestion_has_unique_contiguous_sequences(store):
+    def import_batch(batch):
+        return ingest(store, [event(i, f"batch {batch} event {i}") for i in range(20)], session=f"concurrent-{batch}")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(import_batch, range(12)))
+    assert sum(result["inserted"] for result in results) == 240
+    records = store.events_after("alpha", limit=1000)
+    assert [record["sequence"] for record in records] == list(range(240))
+    assert len({record["id"] for record in records}) == 240
+    assert len(store.list_sessions("alpha")) == 12
+    covered = [i for node in store.view("alpha", 17) for i in range(node["lo"], node["hi"] + 1)]
+    assert covered == list(range(240))
+
+
+def test_concurrent_identical_retries_insert_once(store):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: ingest(store, [event(0)]), range(16)))
+    assert sum(result["inserted"] for result in results) == 1
+    assert len({result["event_ids"][0] for result in results}) == 1
+
+
+def test_memory_dedup_keys_and_review_supersession_are_audited(store):
+    old = store.add_memory("alpha", "Old unique statement", idempotency_key="old")
+    assert old["status"] == "candidate"
+    assert old["provenance"] == "unverified_explicit_note"
+    assert old["id"] == store.add_memory("alpha", "Old unique statement", idempotency_key="other-key")["id"]
+    with pytest.raises(ValueError, match="Idempotency"):
+        store.add_memory("alpha", "different", idempotency_key="other-key")
+    assert "Old unique statement" not in store.context("alpha")["text"]
+    store.review_memory("alpha", old["id"], "active")
+    replacement = store.add_memory("alpha", "New replacement statement")
+    rejected = store.add_memory("alpha", "Rejected proposal")
+    store.review_memory("alpha", rejected["id"], "rejected")
+    updated = store.review_memory("alpha", replacement["id"], "active", supersedes=old["id"])
+    archived = store.get_memory("alpha", old["id"])
+    assert archived["statement"] == "Old unique statement"
+    assert archived["status"] == "superseded"
+    assert archived["superseded_by"] == replacement["id"]
+    assert [review["status"] for review in archived["reviews"]] == ["active", "superseded"]
+    assert updated["supersedes"] == old["id"]
+    assert len(store.review_memory("alpha", replacement["id"], "active", supersedes=old["id"])["reviews"]) == 1
+    context = store.context("alpha")["text"]
+    assert "New replacement statement" in context
+    assert "Old unique statement" not in context
+    assert "Rejected proposal" not in context
+    assert [memory["id"] for memory in store.list_memories("alpha")] == [replacement["id"]]
+    for bad_status in ["candidate", "superseded", "approved", ""]:
+        with pytest.raises(ValueError):
+            store.review_memory("alpha", replacement["id"], bad_status)
+
+
+def test_cross_project_supersession_rolls_back_activation(store):
+    old = store.add_memory("alpha", "alpha old")
+    store.review_memory("alpha", old["id"], "active")
+    replacement = store.add_memory("beta", "beta replacement")
+    with pytest.raises(KeyError):
+        store.review_memory("beta", replacement["id"], "active", supersedes=old["id"])
+    assert store.get_memory("beta", replacement["id"])["status"] == "candidate"
+    assert store.get_memory("alpha", old["id"])["status"] == "active"
+
+
+def test_context_budget_includes_headers_and_embedded_text(store):
+    ingest(store, [event(i, 'untrusted "instructions"\n' + "文" * 300) for i in range(20)])
+    note = store.add_memory("alpha", "Current reviewed note")
+    store.review_memory("alpha", note["id"], "active")
+    for budget in [0, 1, 20, 200, 700, 1000, 12000]:
+        context = store.context("alpha", budget, "instructions")
+        assert context["char_count"] == len(context["text"]) <= budget
+        if budget <= 700:
+            assert context["truncated"]
+    context = store.context("alpha")
+    assert context["text"].startswith("HISTORICAL UNTRUSTED DATA")
+    assert context["text"].index("Current reviewed note") < context["text"].index("historical_tree_excerpt")
+
+
+def test_context_explicitly_marks_truncated_active_statements(store):
+    note = store.add_memory("alpha", "Long active statement " + "x" * 5000)
+    store.review_memory("alpha", note["id"], "active", actor="owner-admin")
+    context = store.context("alpha")
+    assert context["truncated"]
+    assert '"statement_truncated":true' in context["text"]
+    assert store.get_memory("alpha", note["id"])["reviews"][0]["actor"] == "owner-admin"
+
+
+def test_tree_zoom_reaches_original_and_rebuild_is_deterministic(store):
+    results = ingest(store, [event(i, "Long original text " + str(i) + " 文" * 300) for i in range(37)])
+    original_view = store.view("alpha", 7)
+    first = original_view[0]
+    node = store.zoom("alpha", first["id"])
+    while node["children"]:
+        node = store.zoom("alpha", node["children"][0]["id"])
+    assert node["event"]["id"] == results["event_ids"][0]
+    assert node["event"]["raw"] == event(0)["raw"]
+    rebuilt = store.rebuild_tree("alpha")
+    assert rebuilt["events"] == 37
+    assert store.view("alpha", 7) == original_view
+
+
+def test_bottom_up_semantic_tasks_and_compare_and_set(store):
+    ingest(store, [event(i, f"Long source {i}: " + "字" * 300) for i in range(4)])
+    tasks = store.summary_tasks("alpha")
+    assert [(task["lo"], task["hi"]) for task in tasks] == [(0, 0), (1, 1), (2, 2), (3, 3)]
+    assert all(json.loads(task["source_text"])["role"] == "user" for task in tasks)
+    with pytest.raises(ValueError, match="source changed"):
+        store.complete_summary("alpha", tasks[0]["id"], "short", "wrong-hash", "test-model")
+    for task in tasks:
+        result = store.complete_summary("alpha", task["id"], "Summary " + "a" * 290, task["source_hash"], "test-model")
+        assert result["mode"] == "semantic"
+        assert not result["original_verbatim"]
+        assert result["summary_model"] == "test-model"
+    parents = store.summary_tasks("alpha")
+    assert [(task["lo"], task["hi"]) for task in parents] == [(0, 1), (2, 3)]
+    for task in parents:
+        store.complete_summary("alpha", task["id"], "Very short parent", task["source_hash"], "test-model")
+    assert not store.summary_tasks("alpha")  # Free concatenation finishes root.
+    root = store.view("alpha", 1)[0]
+    assert root["mode"] == "semantic"
+    assert root["summary_model"] == "builtin-concat"
+    assert not root["original_verbatim"]
+    with pytest.raises(ValueError, match="already been"):
+        store.complete_summary("alpha", tasks[0]["id"], "Overwrite", tasks[0]["source_hash"], "test-model")
+    with pytest.raises(ValueError, match="512"):
+        store.complete_summary("alpha", tasks[0]["id"], "字" * 200, tasks[0]["source_hash"], "test-model")
+    store.rebuild_tree("alpha")
+    assert len(store.summary_tasks("alpha")) == 4
+
+
+def test_summary_task_exclusions_do_not_change_tree_or_block_other_branches(store):
+    ingest(store, [event(i, f"Long source {i}: " + "字" * 300) for i in range(4)])
+    tasks = store.summary_tasks("alpha")
+    blocked = tasks[0]["id"]
+    assert [task["id"] for task in store.summary_tasks("alpha", 1, [blocked])] == [tasks[1]["id"]]
+    for task in store.summary_tasks("alpha", exclude_ids=[blocked]):
+        store.complete_summary("alpha", task["id"], "Brief semantic summary", task["source_hash"], "fake-model")
+    assert not store.summary_tasks("alpha", exclude_ids=[blocked])
+    assert store.zoom("alpha", blocked)["node"]["mode"] == "extractive"
+    # The unaffected [2,3] branch can finish with free semantic concatenation.
+    right = store.zoom("alpha", store.view("alpha", 1)[0]["id"])["children"][1]
+    assert right["mode"] == "semantic"
+    assert right["summary_model"] == "builtin-concat"
+    assert [task["id"] for task in store.summary_tasks("alpha")] == [blocked]
+    assert store.stats("alpha")["events"] == 4
+
+
+def test_online_backup_restores_raw_history_memories_tree_and_fts(store, tmp_path):
+    archived = ingest(store, [event(i, f"backup controller {i}") for i in range(23)])
+    note = store.add_memory("alpha", "backup remembered decision", source_event_ids=archived["event_ids"][:2])
+    store.review_memory("alpha", note["id"], "active")
+    destination = tmp_path / "backups" / "snapshot.sqlite3"
+    result = store.backup(destination)
+    assert result["size_bytes"] > 0
+    restored = Store(destination)
+    assert restored.stats("alpha") == store.stats("alpha")
+    assert restored.get_session("alpha", archived["session_id"]) == store.get_session("alpha", archived["session_id"])
+    assert restored.get_memory("alpha", note["id"]) == store.get_memory("alpha", note["id"])
+    assert restored.view("alpha") == store.view("alpha")
+    assert restored.search("alpha", "remembered") == store.search("alpha", "remembered")
+    with pytest.raises(ValueError):
+        store.backup(store.path)
+
+
+def test_unknown_newer_schema_is_refused(tmp_path):
+    path = tmp_path / "future.sqlite3"
+    with sqlite3.connect(path) as con:
+        con.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    with pytest.raises(RuntimeError, match="newer"):
+        Store(path)
+
+
+@pytest.mark.parametrize("project", ["../private", "Alpha", "a/b", "", "x" * 65])
+def test_store_rejects_invalid_project_slugs(store, project):
+    with pytest.raises(ValueError):
+        store.create_project(project)

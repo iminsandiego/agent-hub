@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent Hub local candidate extraction for %i
+After=agent-hub.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-hub
+ExecStart=%h/agent-hub/.venv/bin/agent-hub worker --server-config %h/.local/share/agent-hub/server.json --project %i --interval 30
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

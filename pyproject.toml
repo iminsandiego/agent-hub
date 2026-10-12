@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-hub"
+version = "0.1.1"
+description = "Private, project-scoped memory and portable configuration for coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.142.2",
+  "uvicorn==0.54.0",
+  "mcp==1.30.0",
+  "httpx==0.28.1",
+  "pydantic==2.13.5",
+  "tomlkit==0.15.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "build==1.6.1"]
+
+[project.scripts]
+agent-hub = "agent_hub.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agent_hub = ["static/*", "catalog.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

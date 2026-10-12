@@ -1,0 +1,38 @@
+x-hub: &hub
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  image: agent-hub:local
+  volumes:
+    - agent-hub-data:/data
+  environment:
+    AGENT_HUB_DATA_DIR: /data
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  init: true
+
+services:
+  memory:
+    <<: *hub
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+  worker:
+    <<: *hub
+    profiles: ["worker"]
+    restart: unless-stopped
+    command: ["worker", "--data-dir", "/data", "--project", "${AGENT_HUB_WORKER_PROJECT:-atlas}", "--interval", "30"]
+    depends_on:
+      memory:
+        condition: service_healthy
+
+volumes:
+  agent-hub-data:

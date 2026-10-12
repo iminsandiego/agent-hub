@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Hub shared memory service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-hub
+ExecStart=%h/agent-hub/.venv/bin/agent-hub serve --server-config %h/.local/share/agent-hub/server.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
