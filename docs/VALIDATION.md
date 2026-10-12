@@ -201,8 +201,8 @@ No actual personal logs were imported during these checks. Follow the target-hos
 
 ## Version 0.1.6 privacy and backfill, October 12, 2026
 
-macOS Python 3.12: `PYTHONPATH=src python -m pytest -q` passed **286 tests**,
-one upstream Starlette warning, 4.25 seconds. New synthetic tests exercise
+macOS Python 3.12: `PYTHONPATH=src python -m pytest -q` passed **287 tests**,
+one upstream Starlette warning, 4.24 seconds. New synthetic tests exercise
 prefix exclusion before storage, replay after checkpoint loss, late T3/native
 aliases, child inheritance without parent/sibling deletion, real authorization,
 source-linked note/index/tree purge, stable surviving IDs, restore with current
@@ -225,7 +225,7 @@ The full 286-test release gate passed again after a live large-archive test expo
 ### Deployed privacy and real T3 recall
 
 Mac Python3.12 and Debian13/VM Python3.13.5 installed0.1.6 with matching
-`store.py` SHA256 `c2471c0ca1416d69b187522af91b146ed39edbb9dcbc735da56e6b7cac1d5e9b`.
+`store.py` SHA256 `2bb34ab24a5669e1677cedaa961e0c304076744e57106990ec50b3ea42c50060`.
 Both installed dependency checks passed. The service, native watcher, T3 reader
 and backup timer were active after deployment. Only Agent Hub services were
 restarted; T3 and unrelated workloads remained running.
@@ -258,3 +258,21 @@ Private GitHub push was confirmed by matching remote/local main SHA
 https://github.com/iminsandiego/agent-hub/actions/runs/38209299651:
 Python3.11/3.12 on Ubuntu, macOS and Windows, plus Docker build/CLI startup.
 The repository readback confirmed private visibility and administrator access.
+
+
+Full historical backfill processed all available original Mac/VM Codex and
+Claude files, all available native transcript files. Two actively
+changing Mac chats continue streaming; their saved historical prefixes were
+acknowledged. Eight Mac/four VM older hook jobs reference nonexistent sessions
+or source files and remain visible; they are not available historical transcripts.
+Transient interrupted-upload jobs drained successfully without source alteration.
+
+A larger live backup exposed repeated-copy starvation from ongoing writes.
+The fix pins and establishes a WAL read snapshot throughout all incremental
+backup steps. A regression writes successfully from a separate connection during
+backup and verifies that the snapshot contains only the original source record,
+while the live archive contains the new record. The final full suite passed
+**287 tests**, one upstream warning, in4.24seconds, and package build succeeded.
+This follows SQLite's documented restart behavior for changing source databases:
+https://www.sqlite.org/backup.html. Only the owned unfinished temporary copy was
+cleaned; no completed snapshot or user history was removed.

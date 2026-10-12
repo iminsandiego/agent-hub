@@ -1034,7 +1034,10 @@ class Store:
         os.close(fd)
         temporary_path = Path(temporary)
         try:
-            with self._connection() as source:
+            # Pin a WAL read snapshot across every incremental backup step.
+            # Otherwise continuous capture can restart a large copy indefinitely.
+            with self._read() as source:
+                source.execute("SELECT 1 FROM sqlite_schema LIMIT 1").fetchone()
                 backup = sqlite3.connect(temporary)
                 try:
                     source.backup(backup, pages=256)

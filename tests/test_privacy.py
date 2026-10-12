@@ -282,3 +282,31 @@ def test_upgrade_excludes_already_checkpointed_temporary_native_chat(tmp_path,mo
     ingest_file(cfg,path,memory=Memory(),state=state)
     assert store.search('home','oldPrivateCanary')==[]
     with pytest.raises(KeyError):store.get_session('home',legacy['session_id'])
+
+
+def test_online_backup_pins_snapshot_without_blocking_capture(store, tmp_path, monkeypatch):
+    original = capture(store, events=[event('snapshot ' * 10000)])
+    connect = sqlite3.connect
+    wrote = []
+    class ConcurrentBackup(sqlite3.Connection):
+        def backup(self, target, **kwargs):
+            if self.execute('PRAGMA database_list').fetchone()[2] != str(store.path):
+                return super().backup(target, **kwargs)
+            assert self.in_transaction
+            def step(status, remaining, total):
+                if remaining and not wrote:
+                    # Separate WAL writer must succeed during the pinned snapshot.
+                    wrote.append(capture(store, 'after-snapshot', events=[event('new live chat')]))
+            return super().backup(target, pages=1, progress=step)
+    def factory(*args, **kwargs):
+        kwargs['factory'] = ConcurrentBackup
+        return connect(*args, **kwargs)
+    monkeypatch.setattr(sqlite3, 'connect', factory)
+    destination = tmp_path / 'snapshot.sqlite3'
+    receipt = store.backup(destination)
+    assert wrote and store.stats('home')['events'] == 2
+    with connect(destination) as con:
+        assert con.execute('SELECT count(*) FROM events').fetchone()[0] == 1
+        assert con.execute('SELECT id FROM events').fetchone()[0] == original['event_ids'][0]
+        assert con.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert Path(receipt['privacy_ledger']).exists()
