@@ -1,5 +1,9 @@
 # Validation evidence
 
+## Version 0.1.3 Windows installation correction
+
+The first published 0.1.2 GitHub run passed Linux and macOS on Python 3.11/3.12 plus the Docker build/CLI check. Both Windows jobs failed before tests because MCP requires an unpinned Windows-only pywin32 dependency in hash mode. Version 0.1.3 adds a platform-marked pin and hashes from PyPI without changing runtime code. Local macOS Python 3.12.14 release checks passed: 253 tests (one existing warning, 3.87 seconds) and isolated wheel/source build. Publication receipt records the final remote run outcome. Native Codex/Claude/T3 sessions and permanent deployment remain unvalidated.
+
 ## Version 0.1.2 domain separation · 11 October 2026 (America/Los_Angeles)
 
 Recovered the complete 0.1.1 ZIP from the original conversation's download control. Original archive: 739,014 bytes, SHA-256 `14194748e6753271cf3abae554131dcf3e069fe64a3d0ce75253bc954f16ab82`. Local tag `v0.1.1` preserves its source tree as recovered; the original author's reported checks below are historical evidence, not re-executed 0.1.1 claims.
