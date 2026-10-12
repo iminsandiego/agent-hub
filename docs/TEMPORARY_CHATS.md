@@ -28,9 +28,9 @@ credentials or an automatically approved deletion tool.
 ## What gets removed and what remains
 
 Forgetting removes the session metadata, original events, raw record strings,
-search entries and every note citing one of those events. It rebuilds the whole
-project's summary tree so summaries that used earlier context do not retain the
-removed content. Surviving event IDs and sequence positions are unchanged;
+search entries and every note citing one of those events. It replaces the erased
+summary leaves and every ancestor that depended on them, preserving unrelated
+summaries and avoiding a full archive rebuild. Surviving event IDs and sequence positions are unchanged;
 content-free gap markers preserve the tree's navigation. Stale model-worker
 summary/extraction completions are rejected using a privacy revision.
 

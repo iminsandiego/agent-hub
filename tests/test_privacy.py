@@ -128,6 +128,25 @@ def test_concurrent_replay_and_forget_are_serialized(store):
     assert capture(store)['suppressed']=='forgotten'
 
 
+def test_forget_updates_only_dependent_tree_nodes(store, monkeypatch):
+    from agent_hub.tree import node_id
+    first = capture(store, events=[event('privacyCanary ' * 100)])
+    capture(store, 'survivor', events=[event('survivor ' * 100)])
+    task = next(t for t in store.summary_tasks('home') if t['event_id'] != first['event_ids'][0] and t['lo'] == t['hi'])
+    store.complete_summary('home', task['id'], 'safe semantic summary', task['source_hash'], 'synthetic')
+    capture(store, 'later', events=[event('later')])
+    def full_rebuild(*args):
+        raise AssertionError('Forgetting a small chat must not rebuild the entire archive')
+    monkeypatch.setattr(store, '_rebuild_tree', full_rebuild)
+    store.set_session_privacy('home', first['session_id'], 'forgotten')
+    assert store.zoom('home', node_id('home', 1, 1))['node']['mode'] == 'semantic'
+    assert store.zoom('home', node_id('home', 0, 1))['node']['mode'] != 'semantic'
+    with store._read() as con:
+        assert not con.execute("SELECT 1 FROM tree_nodes WHERE summary LIKE '%privacyCanary%'").fetchone()
+    assert store.stats('home')['tree_nodes'] == 4
+    assert store.view('home')
+
+
 def test_admin_only_and_cross_project_denial(tmp_path):
     app=create_app(ServerSettings(data_dir=tmp_path/'server'))
     app.state.store.create_project('home');app.state.store.create_project('work')

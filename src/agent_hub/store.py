@@ -465,12 +465,12 @@ class Store:
         for table in ("memory_keys", "memory_sources"):
             con.execute(f"DELETE FROM {table} WHERE project=? AND memory_id IN (SELECT id FROM purge_memories)", (project,))
         con.execute("DELETE FROM memories WHERE project=? AND id IN (SELECT id FROM purge_memories)", (project,))
-        con.execute("DELETE FROM tree_nodes WHERE project=?", (project,))
+        erased = [row[0] for row in con.execute("SELECT sequence FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))]
+        self._erase_tree(con, project, erased)
         con.execute("INSERT OR IGNORE INTO erased_sequences SELECT project,sequence FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
         con.execute("DELETE FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
         con.execute("DELETE FROM sessions WHERE project=? AND id IN (SELECT id FROM purge_ids)", (project,))
         con.execute("INSERT INTO privacy_revisions VALUES(?,1) ON CONFLICT(project) DO UPDATE SET revision=revision+1", (project,))
-        self._rebuild_tree(con, project)
         # FTS segments can retain obsolete postings until merged.
         if self.fts_enabled:
             con.execute("INSERT INTO history_fts(history_fts) VALUES('optimize')")
@@ -796,6 +796,34 @@ class Store:
             raise RuntimeError("Project sequence counter does not match archived history")
         nodes = con.execute("SELECT count(*) FROM tree_nodes WHERE project=?", (project,)).fetchone()[0]
         return {"project": project, "events": actual, "nodes": nodes, "semantic_summaries_reset": True}
+
+    def _erase_tree(self, con: sqlite3.Connection, project: str, sequences: list[int]) -> None:
+        """Replace erased leaves and their ancestors; unrelated history stays intact."""
+        count = self._project(con, project)["next_sequence"]
+        affected: set[tuple[int, int]] = set()
+        for sequence in sequences:
+            span = 1
+            while span <= count:
+                lo = sequence // span * span
+                if lo + span <= count:
+                    affected.add((span, lo))
+                span *= 2
+        for span, lo in sorted(affected):
+            hi = lo + span - 1
+            if span == 1:
+                replacement = make_leaf(project, lo, "Excluded source omitted", role="system")
+            else:
+                mid = lo + span // 2
+                children = [con.execute("SELECT * FROM tree_nodes WHERE project=? AND id=?",
+                            (project, node_id(project, left, right))).fetchone()
+                            for left, right in [(lo, mid - 1), (mid, hi)]]
+                if any(child is None for child in children):
+                    raise RuntimeError("Incomplete summary tree; rebuild the project's tree")
+                replacement = merge_nodes(project, self._node(children[0]), self._node(children[1]))
+            con.execute("UPDATE tree_nodes SET summary=?,mode=?,event_id=?,original_verbatim=?,"
+                        "source_hash=NULL,summary_model=NULL,summarized_at=NULL WHERE project=? AND id=?",
+                        (replacement["summary"], replacement["mode"], replacement.get("event_id"),
+                         int(replacement["original_verbatim"]), project, replacement["id"]))
 
     def rebuild_tree(self, project: str) -> dict[str, Any]:
         with self._connection(write=True) as con:

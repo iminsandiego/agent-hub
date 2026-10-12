@@ -202,7 +202,7 @@ No actual personal logs were imported during these checks. Follow the target-hos
 ## Version 0.1.6 privacy and backfill, October 12, 2026
 
 macOS Python 3.12: `PYTHONPATH=src python -m pytest -q` passed **285 tests**,
-one upstream Starlette warning, 4.38 seconds. New synthetic tests exercise
+one upstream Starlette warning, 4.25 seconds. New synthetic tests exercise
 prefix exclusion before storage, replay after checkpoint loss, late T3/native
 aliases, child inheritance without parent/sibling deletion, real authorization,
 source-linked note/index/tree purge, stable surviving IDs, restore with current
@@ -218,3 +218,5 @@ fixture only; the screenshot was visually inspected. The local runner reads its
 private fixture credential directly; no production credential was sent to a
 browser connector. The package build and JavaScript syntax check passed. Target
 installation/backfill evidence is recorded separately after deployment.
+
+The full 286-test release gate passed again after a live large-archive test exposed a deletion stall. Forgetting now replaces only erased leaves and affected ancestors, with a regression asserting that unrelated semantic summaries survive and a full rebuild is not used. Package rebuild succeeded; backfill jobs yield to ordinary live capture. Target-server replay and complete inventory evidence follow below.
