@@ -4,7 +4,15 @@ Agent Hub keeps history on your server. Each computer runs a small local client 
 
 Start with the [server guide](SERVER_SETUP.md). You need its HTTPS URL and a separate, revocable project-scoped token for this computer. A local SSH tunnel to a loopback HTTP endpoint also works. Agent Hub verifies TLS; remote plain HTTP is rejected.
 
-For mixed home/work use, follow [domain setup and ingestion](DOMAINS_AND_INGESTION.md) first. The legacy examples below illustrate mechanics; use domain-prefixed projects, separate profiles and explicit allowlists for new installs.
+For mixed home/work use, review [domain setup and ingestion](DOMAINS_AND_INGESTION.md).
+Strict domains and allowlists are optional; the home deployment deliberately uses
+one `home` project without directory guards. Work can use an independent server
+and profile. Choose the boundaries appropriate to the installation.
+
+For retrieval without a lookup reminder, follow [automatic memory setup](AUTOMATIC_MEMORY.md).
+It includes Codex/Claude instructions, Grok MCP setup, real T3 qualification and
+the current temporary-chat/deletion limitations. Normal `setup` registers
+Codex/Claude MCP and hooks; it does not install that global instruction policy.
 
 ## Install on a new computer
 
