@@ -516,8 +516,32 @@ class Store:
             ):
                 item = dict(row)
                 item["metadata"] = json.loads(item.pop("metadata_json"))
+                item.update(self._session_outline(con, project, item["id"]))
                 result.append(item)
             return result
+
+    @staticmethod
+    def _session_outline(con: sqlite3.Connection, project: str, session_id: str) -> dict[str, Any]:
+        """Bounded browser hints: an opening-request excerpt and the source time span."""
+        edges = [con.execute(
+            "SELECT source_timestamp FROM events WHERE project=? AND session_id=? ORDER BY sequence " + order + " LIMIT 1",
+            (project, session_id)).fetchone() for order in ("ASC", "DESC")]
+        preview = None
+        for (text,) in con.execute(
+            "SELECT substr(text,1,600) FROM events WHERE project=? AND session_id=? AND role='user' ORDER BY sequence LIMIT 8",
+            (project, session_id),
+        ):
+            # Clients inject environment/instruction blocks as user records; prefer the first typed request.
+            if text.strip() and not text.lstrip().startswith(("<", "# AGENTS.md", "Caveat:")):
+                preview = text
+                break
+        if preview is None:
+            first = con.execute("SELECT substr(text,1,600) FROM events WHERE project=? AND session_id=? ORDER BY sequence LIMIT 1",
+                                (project, session_id)).fetchone()
+            preview = first[0] if first else None
+        return {"preview": _excerpt(" ".join(preview.split()), 240) if preview else None,
+                "first_timestamp": edges[0][0] if edges[0] else None,
+                "last_timestamp": edges[1][0] if edges[1] else None}
 
     def events_after(self, project: str, after_sequence: int = -1, limit: int = 100) -> list[dict[str, Any]]:
         """Read ordered events for a crash-safe, incremental background worker."""

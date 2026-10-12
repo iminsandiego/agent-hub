@@ -3,45 +3,88 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Agent Hub · Shared memory</title>
+  <meta name="color-scheme" content="light dark">
+  <title>Agent Hub</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <script defer src="/static/app.js"></script>
 </head>
 <body>
-  <div class="shell">
-    <aside class="sidebar">
-      <a class="brand" href="/"><span class="mark">a<span>h</span></span><span>Agent Hub<small>Shared memory, with sources</small></span></a>
-      <div class="project-field"><label for="project">MEMORY PROJECT</label><select id="project" disabled><option>Connect to choose</option></select></div>
-      <nav aria-label="Main navigation">
-        <button class="nav active" data-view="overview"><span>◈</span> Overview</button>
-        <button class="nav" data-view="search"><span>⌕</span> Search memory</button>
-        <button class="nav" data-view="sessions"><span>≡</span> Captured sessions</button>
-        <button class="nav" data-view="review"><span>✓</span> Review notes</button>
-        <button class="nav" data-view="catalog"><span>⊞</span> Integrations</button>
-      </nav>
-      <div class="side-foot"><span class="status-dot"></span><span id="connection-status">Not connected</span><button id="disconnect" class="text-button" hidden>Disconnect</button></div>
+  <!-- Connect screen. The token is held only in page memory. -->
+  <section id="connect" class="connect" aria-labelledby="connect-title">
+    <div class="connect-card">
+      <div class="connect-brand"><span class="logo" aria-hidden="true">ah</span><span>Agent Hub</span></div>
+      <h1 id="connect-title">Open your agents’ memory</h1>
+      <p class="lede">Search what your agents saw and decided, read captured sessions, and choose which notes every new session starts with.</p>
+
+      <div id="server-check" class="server-check" data-state="checking">
+        <span class="dot" aria-hidden="true"></span>
+        <div><strong id="server-title">Checking this server…</strong><span id="server-detail"></span></div>
+      </div>
+
+      <form id="connect-form" autocomplete="off">
+        <label for="token">Access token</label>
+        <div class="token-row">
+          <input id="token" type="password" spellcheck="false" placeholder="Paste a token for this server" required>
+          <button type="button" id="token-reveal" class="ghost small" aria-pressed="false">Show</button>
+        </div>
+        <p id="connect-error" class="form-error" role="alert" hidden></p>
+        <button type="submit" class="primary wide" id="connect-submit">Connect</button>
+      </form>
+
+      <details class="help">
+        <summary>Where do I find a token?</summary>
+        <p>Tokens belong to one server. Use a token issued by the server behind this address, not one from another computer’s service.</p>
+        <p><b>Full access</b> (review notes, forget chats): on the server, read the administrator token created by <code>agent-hub init-server</code>, by default <code>~/.local/share/agent-hub/admin.token</code>.</p>
+        <p><b>Browse only</b>: issue a scoped token on the server with <code>agent-hub token create --name browser --project PROJECT --permissions read --output browser.token</code>.</p>
+        <p>The token stays in this tab’s memory. Reloading or closing the tab disconnects.</p>
+      </details>
+    </div>
+  </section>
+
+  <!-- Application shell -->
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <a class="brand" href="#" id="brand-link" aria-label="Agent Hub home"><span class="logo" aria-hidden="true">ah</span><span class="brand-name">Agent Hub</span></a>
+      <label class="project-picker">
+        <span class="sr-only">Memory project</span>
+        <select id="project" aria-label="Memory project"></select>
+      </label>
+      <form id="global-search" class="global-search" role="search">
+        <input id="global-query" type="search" placeholder="Search memory" aria-label="Search memory" autocomplete="off">
+        <kbd aria-hidden="true">/</kbd>
+      </form>
+      <div class="identity">
+        <span id="identity-name" class="identity-name"></span>
+        <span id="identity-role" class="badge"></span>
+        <button id="disconnect" class="ghost small" type="button">Disconnect</button>
+      </div>
+    </header>
+
+    <nav class="rail" aria-label="Main navigation">
+      <a class="rail-link" data-view="home" href="#">Home</a>
+      <a class="rail-link" data-view="search" href="#">Search</a>
+      <a class="rail-link" data-view="sessions" href="#">Sessions</a>
+      <a class="rail-link" data-view="notes" href="#">Notes<span id="review-count" class="count" hidden></span></a>
+      <a class="rail-link" data-view="context" href="#"><span class="rail-label">Agent context</span><span class="rail-short">Context</span></a>
+      <a class="rail-link" data-view="timeline" href="#">Timeline</a>
+      <a class="rail-link" data-view="integrations" href="#"><span class="rail-label">Connect agents</span><span class="rail-short">Connect</span></a>
+      <div class="rail-foot" id="server-foot"></div>
+    </nav>
+
+    <main id="main" tabindex="-1"></main>
+
+    <aside id="inspector" class="inspector" aria-label="Record inspector" hidden>
+      <header class="inspector-head">
+        <button id="inspector-back" class="icon-button" type="button" aria-label="Back" hidden></button>
+        <h2 id="inspector-title">Record</h2>
+        <button id="inspector-close" class="icon-button" type="button" aria-label="Close inspector"></button>
+      </header>
+      <div id="inspector-body" class="inspector-body"></div>
     </aside>
-    <main>
-      <header class="topbar"><span>YOUR AGENT WORKSPACE</span><span class="pill">Memory service · v0.1</span></header>
-      <section id="login" class="welcome">
-        <div class="eyebrow">CONTINUITY ACROSS COMPUTERS</div>
-        <h1>Your agents change.<br>Your knowledge stays.</h1>
-        <p>Find previous decisions, inspect their sources, and carry useful context into the next session.</p>
-        <form id="connect-form" class="connect-card">
-          <label for="token">Connect with your access token</label>
-          <div class="input-row"><input id="token" type="password" autocomplete="off" placeholder="Paste a scoped access token" required><button type="submit" class="primary">Connect <span>→</span></button></div>
-          <small>The token stays in this tab. Your project permissions apply to every view.</small>
-        </form>
-        <div class="welcome-grid"><div><b>01</b><h3>Capture</h3><p>Keep the original records from your work.</p></div><div><b>02</b><h3>Remember</h3><p>Review useful findings and decisions.</p></div><div><b>03</b><h3>Retrieve</h3><p>Follow every memory back to its source.</p></div></div>
-      </section>
-      <section id="workspace" hidden>
-        <div class="page-heading"><div><div class="eyebrow" id="scope-label">PROJECT MEMORY</div><h1 id="page-title">An overview of what stays.</h1></div><button class="secondary" id="refresh">Refresh ↻</button></div>
-        <p id="page-description" class="description"></p>
-        <div id="content" aria-live="polite"></div>
-      </section>
-      <div id="notice" role="status" hidden></div>
-    </main>
   </div>
-  <dialog id="detail"><div class="dialog-head"><h2 id="detail-title">Source detail</h2><button id="close-detail" class="secondary" aria-label="Close details">Close ×</button></div><div id="detail-content"></div></dialog>
+
+  <dialog id="modal" class="modal"><div id="modal-body"></div></dialog>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 </body>
 </html>

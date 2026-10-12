@@ -37,6 +37,22 @@ def authorize_principal(project: str, permission: str = "read") -> Principal:
     return principal
 
 
+def same_origin(origin: str, host: str) -> bool:
+    """True when a browser Origin names the already allowlisted Host it is sending to.
+
+    A page served by this service through an SSH tunnel or proxy on another port
+    is not cross-site. Hosts are still checked first, so DNS rebinding fails.
+    """
+    try:
+        parsed, target = urlsplit(origin), urlsplit("//" + host)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or not target.hostname:
+            return False
+        default = 443 if parsed.scheme == "https" else 80
+        return (parsed.hostname.lower(), parsed.port or default) == (target.hostname.lower(), target.port or default)
+    except ValueError:
+        return False
+
+
 class GuardMiddleware:
     """Check identity before accepting request bytes. Apply to REST and MCP alike."""
     def __init__(self, app, *, settings: ServerSettings, auth: AuthStore):
@@ -56,7 +72,7 @@ class GuardMiddleware:
             await JSONResponse({"detail": "Host is not allowed"}, status_code=403)(scope, receive, send)
             return
         origin = headers.get("origin")
-        if origin is not None and origin not in self.settings.allowed_origins:
+        if origin is not None and origin not in self.settings.allowed_origins and not same_origin(origin, headers.get("host", "")):
             await JSONResponse({"detail": "Origin is not allowed"}, status_code=403)(scope, receive, send)
             return
         path = scope.get("path", "")
@@ -215,7 +231,7 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": __version__}
+        return {"status": "ok", "version": __version__, "domain": settings.domain}
 
     @app.get("/v1/projects")
     async def projects():

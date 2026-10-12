@@ -1,3 +1,34 @@
+## Memory browser redesign and tunnel origins, October 12, 2026
+
+The browser UI was rewritten (`src/agent_hub/static/`): project home, search with
+highlighted matches, session transcripts, a record/note inspector, an agent-context
+preview, a summary-tree timeline and a connect-agents page. It still loads no
+third-party code, renders captured text with `textContent` only and keeps the token
+in page memory.
+
+Server changes: a browser `Origin` naming the same allowed host and port as the
+request is accepted (previously a page opened through an SSH tunnel on a port other
+than 8765 got `403 Origin is not allowed` on every write, so reviewing notes and
+forgetting chats failed). `/health` now reports the server `domain`, and session
+lists include a bounded `preview` of the first typed user request plus the first
+and last source timestamps.
+
+Linux, CPython 3.13.16: `python -m pytest -q` ran 295 tests, 294 passed. The one
+failure, `test_client_against_real_authenticated_service_contract`, fails the same
+way on the unmodified previous commit with this environment's httpx mock transport.
+New tests cover tunnel-port same-origin writes, still-rejected foreign/default-port
+and non-allowlisted origins, the `/health` domain and session previews.
+
+Browser: `scripts/browser-smoke.cjs` was rewritten for the new UI and passed all
+21 checks in headless Chromium 141 against `scripts/smoke_fixture.py` (synthetic
+data), at 1440×1000 and 390×844, including literal rendering of hostile text, cancel
+and confirm forgetting, no browser storage and no page errors. A separate synthetic
+run through a local TCP forwarder on port 18765 (standing in for an SSH tunnel)
+verified sign-in, note creation and review, in light and dark color schemes.
+The deployed home VM and the Mac tunnel were not exercised.
+
+---
+
 ## Current update: 0.1.5, October 11–12, 2026
 
 This section supersedes the original build's target-installation/publication

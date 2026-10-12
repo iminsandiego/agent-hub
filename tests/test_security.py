@@ -148,6 +148,28 @@ def test_explicit_allowed_origin_and_security_headers(secured_app):
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
+@pytest.mark.parametrize("host,origin,status", [
+    ("127.0.0.1:18765", "http://127.0.0.1:18765", 201),   # browser page served through an SSH tunnel port
+    ("localhost:18765", "http://localhost:18765", 201),
+    ("127.0.0.1:18765", "http://127.0.0.1:3000", 403),    # another local page is still cross-origin
+    ("127.0.0.1:18765", "https://127.0.0.1", 403),        # a default-port origin is a different server
+    ("memory.example.test", "https://memory.example.test", 403),  # same origin, but host not allowlisted
+    ("attacker.invalid:18765", "http://attacker.invalid:18765", 403),  # rebinding fails the host check
+])
+def test_same_origin_browser_writes_through_tunnel_ports(secured_app, host, origin, status):
+    app, tokens = secured_app
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.post("/v1/projects/atlas/memories", json={"statement": "Tunnel origin check"},
+                               headers=auth(tokens, Host=host, Origin=origin))
+    assert response.status_code == status
+
+
+def test_health_identifies_server_domain_without_history(tmp_path):
+    app = create_app(ServerSettings(data_dir=tmp_path / "data", domain="home"))
+    with TestClient(app, base_url="http://localhost") as client:
+        assert client.get("/health").json() == {"status": "ok", "version": app.version, "domain": "home"}
+
+
 @pytest.mark.parametrize("field,value", [
     ("allowed_hosts", ["*"]),
     ("allowed_hosts", ["*.example.test"]),

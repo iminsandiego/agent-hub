@@ -315,3 +315,20 @@ def test_unknown_newer_schema_is_refused(tmp_path):
 def test_store_rejects_invalid_project_slugs(store, project):
     with pytest.raises(ValueError):
         store.create_project(project)
+
+
+def test_session_list_previews_the_first_typed_request_and_source_span(store):
+    ingest(store, [
+        event(0, "<environment_context>cwd: /synthetic</environment_context>", timestamp="2026-10-07T12:00:00Z"),
+        event(1, "# AGENTS.md instructions for /synthetic", timestamp="2026-10-07T12:00:01Z"),
+        event(2, "Assistant text is never a preview", role="assistant", timestamp="2026-10-07T12:00:02Z"),
+        event(3, "Why   does the\nexport fail?", timestamp="2026-10-07T12:05:00Z"),
+    ])
+    ingest(store, [event(0, "Tool output only", role="tool", timestamp=None)], session="tool-only")
+    sessions = {item["external_id"]: item for item in store.list_sessions("alpha")}
+    assert sessions["session"]["preview"] == "Why does the export fail?"
+    assert sessions["session"]["first_timestamp"] == "2026-10-07T12:00:00Z"
+    assert sessions["session"]["last_timestamp"] == "2026-10-07T12:05:00Z"
+    assert sessions["tool-only"]["preview"] == "Tool output only"
+    assert sessions["tool-only"]["first_timestamp"] is None
+    assert len(store.list_sessions("alpha")[0]["preview"]) <= 240

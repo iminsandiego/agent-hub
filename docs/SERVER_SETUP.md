@@ -30,7 +30,7 @@ Visit `http://127.0.0.1:8765` on the server, or establish an SSH tunnel from you
 ssh -L 8765:127.0.0.1:8765 YOUR_SERVER
 ```
 
-The browser at `http://127.0.0.1:8765` will then reach the service through SSH. Obtain the token from its private file on the server using your normal trusted administrative channel. An SSH tunnel also provides a simple initial client endpoint without publishing an HTTP service to the LAN.
+The browser at `http://127.0.0.1:8765` will then reach the service through SSH. Any free local port works, for example `ssh -L 18765:127.0.0.1:8765 YOUR_SERVER` and `http://127.0.0.1:18765`: the service accepts a browser `Origin` that names the same allowed host and port the request was sent to, so tunnelled pages can review notes and forget chats without listing every local port. The sign-in screen shows the server version and domain behind the address before you paste a token. Obtain the token from its private file on the server using your normal trusted administrative channel. An SSH tunnel also provides a simple initial client endpoint without publishing an HTTP service to the LAN.
 
 ### Keep the service running
 
@@ -98,7 +98,7 @@ Update these fields in the private `server.json` before restarting:
 }
 ```
 
-Preserve the other existing fields, particularly `data_dir`. This is a partial example to merge, not a replacement for the full settings file. Native clients usually send no `Origin`; when a browser does, it must match the explicit allowlist. The HTTP `Host` must also match. Do not set wildcard origins or disable TLS verification.
+Preserve the other existing fields, particularly `data_dir`. This is a partial example to merge, not a replacement for the full settings file. Native clients usually send no `Origin`; when a browser does, it must match the explicit allowlist or be the same origin as the allowed `Host` it was sent to. The HTTP `Host` must always match. Do not set wildcard origins or disable TLS verification.
 
 Proxy HTTPS traffic to `127.0.0.1:8765`. The service still needs bearer authentication. A VPN/private-network route protects reachability; it does not replace per-computer authorization. If you use a private CA, install its trust through your operating system or client's supported CA mechanism. The app does not accept `verify=false` as an installation shortcut.
 
