@@ -912,7 +912,8 @@ class Store:
                     backup.commit()
                 finally:
                     backup.close()
-            with temporary_path.open("rb") as stream:
+            # Windows requires a writable descriptor for fsync; r+b preserves bytes.
+            with temporary_path.open("r+b") as stream:
                 os.fsync(stream.fileno())
             os.replace(temporary_path, target)
             if os.name == "posix":

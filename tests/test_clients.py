@@ -490,7 +490,7 @@ def test_client_against_real_authenticated_service_contract(cfg, tmp_path, monke
         text_page = client.get("atlas", "event", event_id, max_chars=10)
         assert len(text_page["text"]) == 10 and "raw" not in text_page
         raw_page = client.get("atlas", "event", event_id, representation="raw", max_chars=24000)
-        assert raw_page["raw"] == source.read_text().splitlines()[1]
+        assert raw_page["raw"] == source.read_text(encoding="utf-8").splitlines()[1]
         assert "text" not in raw_page
         with pytest.raises(ServiceError) as denied:
             client.context("harbor")

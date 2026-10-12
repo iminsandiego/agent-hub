@@ -1,5 +1,9 @@
 # Validation evidence
 
+## Version 0.1.4 Windows backup correction
+
+The 0.1.3 Windows run installed dependencies successfully, then found six backup-related failures from fsync on a read-only descriptor and one test-only Unicode decoding failure. The backup now uses r+b without modifying snapshot bytes, and the UTF-8 fixture assertion declares its encoding. Existing backup/restore and raw-retrieval tests provide cross-platform regression coverage. Final CI results are recorded in the publication receipt; native-client lifecycle and permanent deployment remain unvalidated.
+
 ## Version 0.1.3 Windows installation correction
 
 The first published 0.1.2 GitHub run passed Linux and macOS on Python 3.11/3.12 plus the Docker build/CLI check. Both Windows jobs failed before tests because MCP requires an unpinned Windows-only pywin32 dependency in hash mode. Version 0.1.3 adds a platform-marked pin and hashes from PyPI without changing runtime code. Local macOS Python 3.12.14 release checks passed: 253 tests (one existing warning, 3.87 seconds) and isolated wheel/source build. Publication receipt records the final remote run outcome. Native Codex/Claude/T3 sessions and permanent deployment remain unvalidated.
