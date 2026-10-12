@@ -16,8 +16,8 @@ for a chat whose question/answer should never enter Agent Hub. T3 may create a
 metadata-only thread record before the first user message; it is removed when
 that message establishes the exclusion.
 
-To remove a saved chat, open Agent Hub's **Captured sessions**, choose **Inspect
-session**, then **Forget this chat**. Connect with your private administrator
+To remove a saved chat, open Agent Hub's **Sessions**, open the chat, then choose
+**Forget…** and **Remove from memory**. Connect with your private administrator
 credential to see this action. Confirm the displayed client, computer and source
 session ID. **Make temporary** is also available for an already captured chat.
 Both remove the live copy and permanently suppress capture of those identities.
