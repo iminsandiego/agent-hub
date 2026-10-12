@@ -12,7 +12,7 @@ The watcher has a separate local queue/checkpoint database on each execution hos
 
 ## Status and review
 
-The browser opens on a project home (counts, recent sessions, candidates awaiting review and the active notes every session starts with). It also provides search with highlighted matches, session transcripts, an inspector for each record's text and captured original, a preview of the exact agent context pack, a timeline over the summary tree, and setup steps for connecting another computer. Views are linked by URL fragment, so the browser's back button works; the token itself stays in page memory and is never put in the URL. Source content is rendered as text. A candidate can be activated or rejected with an administrative credential; it can explicitly supersede a previous active note. Normal agent tokens cannot review notes.
+The browser opens on a project home (counts, recent sessions, candidates awaiting review and the active notes every session starts with). It also provides search with highlighted matches, session transcripts, an inspector for each record's text and captured original, a preview of the exact agent context pack, a timeline over the summary tree, and setup steps for connecting another computer. Views are linked by URL fragment, so the browser's back button works. Sign in with the browser password set by `agent-hub set-password` (an `HttpOnly` 30-day session for the REST API only), or paste a token, which stays in page memory and is never put in the URL. Source content is rendered as text. A candidate can be activated or rejected with an administrative credential; it can explicitly supersede a previous active note. Normal agent tokens cannot review notes.
 
 Equivalent local operations:
 

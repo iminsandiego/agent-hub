@@ -167,7 +167,7 @@ def test_same_origin_browser_writes_through_tunnel_ports(secured_app, host, orig
 def test_health_identifies_server_domain_without_history(tmp_path):
     app = create_app(ServerSettings(data_dir=tmp_path / "data", domain="home"))
     with TestClient(app, base_url="http://localhost") as client:
-        assert client.get("/health").json() == {"status": "ok", "version": app.version, "domain": "home"}
+        assert client.get("/health").json() == {"status": "ok", "version": app.version, "domain": "home", "password_login": False}
 
 
 @pytest.mark.parametrize("field,value", [

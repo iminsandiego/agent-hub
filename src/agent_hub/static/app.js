@@ -1,12 +1,13 @@
 "use strict";
 // Agent Hub memory browser.
-// No third-party scripts, no HTML interpolation of captured data (every value is
-// set with textContent), and no persistent token storage: the token lives only in
-// `state` and is dropped on reload, tab close or Disconnect.
+// No third-party scripts and no HTML interpolation of captured data (every value is
+// set with textContent). Two ways in: the password exchanges for a server session
+// held in an HttpOnly cookie this script never sees; a pasted token lives only in
+// `state` and is dropped on reload, tab close or sign-out. Nothing goes in storage.
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  token: "", me: null, health: null, projects: [], project: "",
+  token: "", connected: false, me: null, health: null, projects: [], project: "",
   route: { view: "home", id: "", params: new URLSearchParams() },
   revision: 0, sessions: new Map(), conversationOnly: false,
 };
@@ -45,7 +46,7 @@ function guard(handler) {
   return (event) => { try { Promise.resolve(handler(event)).catch(fail); } catch (e) { fail(e); } };
 }
 function fail(e) {
-  if (e && e.status === 401 && state.token) return disconnect(e.message);
+  if (e && e.status === 401 && state.connected) return disconnect(e.message);
   toast(e && e.message ? e.message : String(e), "error");
 }
 
@@ -129,7 +130,7 @@ class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 async function api(path, { method = "GET", body, raw = false } = {}) {
-  const headers = { Authorization: "Bearer " + state.token };
+  const headers = state.token ? { Authorization: "Bearer " + state.token } : {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   let response;
   try {
@@ -149,6 +150,7 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
   return raw ? response : response.json();
 }
 function explain(status, detail) {
+  if (status === 401 && !state.token) return "You’ve been signed out. Sign in again to continue.";
   if (status === 401) return "This server didn’t accept that token. Tokens belong to one server: use one issued by the service behind " + location.host + ".";
   if (status === 403 && /origin/i.test(detail)) return "The server refused this page’s address (" + location.origin + "). Upgrade the server, or add the address to allowed_origins in its server.json.";
   if (status === 403 && /^host/i.test(detail)) return "The server refused the host name “" + location.hostname + "”. Add it to allowed_hosts in the server’s server.json.";
@@ -181,7 +183,7 @@ function parseHash() {
 const VIEWS = { home: homeView, search: searchView, sessions: sessionsView, notes: notesView, context: contextView, timeline: timelineView, integrations: integrationsView };
 
 async function route() {
-  if (!state.token) return;
+  if (!state.connected) return;
   const next = parseHash();
   if (!(next.view in VIEWS)) next.view = "home";
   if (!state.projects.some((item) => item.id === next.project)) {
@@ -222,7 +224,7 @@ function rerender() { return route(); }
 function renderNoProjects() {
   $("main").replaceChildren(el("div", "view", stateBlock("No projects for this token",
     "This token isn’t assigned to any memory project on this server. Ask the server administrator for a project token, or connect with a different one.",
-    button("Disconnect", () => disconnect(), { cls: "button" }))));
+    button("Sign out", signOut, { cls: "button" }))));
 }
 
 // ------------------------------------------------------------ shared components
@@ -993,43 +995,90 @@ async function checkServer() {
     $("server-detail").textContent = e.message === "403" ? "The server rejected this host name; add it to allowed_hosts in server.json." : "If you use an SSH tunnel, start it, then reload this page.";
   }
 }
+function showSignIn(mode, message) {
+  const passwords = !!(state.health && state.health.password_login);
+  const usePassword = passwords && mode !== "token";
+  $("password-form").hidden = !usePassword;
+  $("connect-form").hidden = usePassword;
+  $("use-password").hidden = !passwords;
+  $("help-no-password").hidden = passwords;
+  $("signin-help").open = !passwords && !!state.health;
+  const error = usePassword ? $("password-error") : $("connect-error");
+  $("password-error").hidden = $("connect-error").hidden = true;
+  if (message) { error.textContent = message; error.hidden = false; }
+  (usePassword ? $("password") : $("token")).focus();
+}
+async function loadIdentity() {
+  const [me, projects] = await Promise.all([api("/v1/me"), api("/v1/projects")]);
+  state.me = me;
+  state.projects = projects.map((item) => ({ id: item.id || item.project, name: item.name || item.id || item.project, size: item.next_sequence || 0 }));
+}
+async function busy(button, label, work) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  try { return await work(); } finally { button.disabled = false; button.textContent = original; }
+}
+async function signIn(event) {
+  event.preventDefault();
+  $("password-error").hidden = true;
+  await busy($("password-submit"), "Signing in…", async () => {
+    let response;
+    try {
+      response = await fetch("/auth/login", { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: $("password").value }) });
+    } catch (_) {
+      return showSignIn("password", "Can’t reach the Agent Hub service at " + location.host + ". If you use an SSH tunnel, check that it is running.");
+    }
+    if (!response.ok) {
+      let detail = "Sign-in failed (" + response.status + ").";
+      try { const value = await response.json(); if (typeof value.detail === "string") detail = value.detail; } catch (_) { /* Keep default. */ }
+      $("password").select();
+      return showSignIn("password", detail);
+    }
+    $("password").value = "";
+    state.token = "";
+    try { await loadIdentity(); } catch (e) { return showSignIn("password", e.message); }
+    enterApp();
+  });
+}
 async function connect(event) {
   event.preventDefault();
-  const submit = $("connect-submit");
-  const error = $("connect-error");
-  error.hidden = true;
-  submit.disabled = true;
-  submit.textContent = "Connecting…";
-  state.token = $("token").value.trim();
-  try {
-    const [me, projects] = await Promise.all([api("/v1/me"), api("/v1/projects")]);
-    state.me = me;
-    state.projects = projects.map((item) => ({ id: item.id || item.project, name: item.name || item.id || item.project, size: item.next_sequence || 0 }));
+  $("connect-error").hidden = true;
+  await busy($("connect-submit"), "Connecting…", async () => {
+    state.token = $("token").value.trim();
+    try {
+      await loadIdentity();
+    } catch (e) {
+      state.token = "";
+      return showSignIn("token", e.message);
+    }
     $("token").value = "";
     enterApp();
-  } catch (e) {
-    state.token = "";
-    error.textContent = e.message;
-    error.hidden = false;
-  } finally {
-    submit.disabled = false;
-    submit.textContent = "Connect";
-  }
+  });
 }
 function enterApp() {
+  state.connected = true;
   $("project").replaceChildren(...state.projects.map((item) => el("option", { value: item.id }, item.name === item.id ? item.id : item.name + " · " + item.id)));
   $("project").disabled = state.projects.length < 2;
   $("identity-name").textContent = state.me.name;
   $("identity-role").textContent = roleName();
   $("identity-role").className = "badge" + (state.me.admin ? " badge-admin" : "");
+  $("disconnect").textContent = state.token ? "Disconnect" : "Sign out";
   $("server-foot").replaceChildren(el("span", "dot ok"), el("span", null, location.host), el("span", "faint", (state.health && state.health.domain ? state.health.domain + " · " : "") + "v" + (state.health ? state.health.version : "?")));
   $("connect").hidden = true;
   $("app").hidden = false;
   state.project = "";
   route();
 }
+async function signOut() {
+  if (!state.token) {
+    try { await fetch("/auth/logout", { method: "POST", cache: "no-store" }); } catch (_) { /* The local state is cleared regardless. */ }
+  }
+  disconnect();
+}
 function disconnect(message) {
-  state.token = ""; state.me = null; state.projects = []; state.project = ""; state.revision++;
+  const mode = state.token ? "token" : "password";
+  state.token = ""; state.connected = false; state.me = null; state.projects = []; state.project = ""; state.revision++;
   state.sessions.clear();
   closeInspector();
   closeModal();
@@ -1037,10 +1086,18 @@ function disconnect(message) {
   $("app").hidden = true;
   $("connect").hidden = false;
   $("review-count").hidden = true;
-  const error = $("connect-error");
-  error.textContent = typeof message === "string" ? message : "";
-  error.hidden = typeof message !== "string";
-  $("token").focus();
+  showSignIn(mode, typeof message === "string" ? message : "");
+}
+async function resume() {
+  // A password session survives reloads in its HttpOnly cookie. Try it before showing the form.
+  await checkServer();
+  if (state.health && state.health.password_login) {
+    try {
+      await loadIdentity();
+      return enterApp();
+    } catch (_) { /* No valid session; show the form. */ }
+  }
+  showSignIn("password");
 }
 
 function init() {
@@ -1048,13 +1105,16 @@ function init() {
   $("inspector-close").append(icon("close"));
   $("inspector-back").append(icon("back"));
   $("connect-form").addEventListener("submit", guard(connect));
+  $("password-form").addEventListener("submit", guard(signIn));
+  $("use-token").addEventListener("click", () => showSignIn("token"));
+  $("use-password").addEventListener("click", () => showSignIn("password"));
   $("token-reveal").addEventListener("click", () => {
     const hidden = $("token").type === "password";
     $("token").type = hidden ? "text" : "password";
     $("token-reveal").textContent = hidden ? "Hide" : "Show";
     $("token-reveal").setAttribute("aria-pressed", String(hidden));
   });
-  $("disconnect").addEventListener("click", () => disconnect());
+  $("disconnect").addEventListener("click", guard(signOut));
   $("brand-link").addEventListener("click", (event) => { event.preventDefault(); go("home"); });
   $("project").addEventListener("change", () => {
     const view = state.route.view;
@@ -1070,10 +1130,10 @@ function init() {
   $("modal").addEventListener("click", (event) => { if (event.target === $("modal")) closeModal(); });
   document.addEventListener("keydown", (event) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
-    if (event.key === "/" && !typing && state.token && !$("modal").open) { event.preventDefault(); $("global-query").focus(); }
+    if (event.key === "/" && !typing && state.connected && !$("modal").open) { event.preventDefault(); $("global-query").focus(); }
     else if (event.key === "Escape" && !$("modal").open && !$("inspector").hidden) closeInspector();
   });
   window.addEventListener("hashchange", () => route());
-  checkServer();
+  resume();
 }
 init();

@@ -191,6 +191,26 @@ def catalog(args):
     output(value if args.action == "list" else {"valid": True, "entries": len(value["entries"])})
 
 
+def set_password(args):
+    settings = settings_for(args)
+    auth = AuthStore(settings.auth_database)
+    if args.disable:
+        auth.clear_password()
+        output({"browser_password": "disabled", "browser_sessions": "signed out"})
+        return
+    if args.stdin:
+        import sys
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        import getpass
+        password = getpass.getpass("New browser password: ")
+        if getpass.getpass("Repeat it: ") != password:
+            raise ValueError("The passwords did not match; nothing was changed")
+    auth.set_password(password)
+    output({"browser_password": "set", "auth_database": str(settings.auth_database),
+            "browser_sessions": "earlier sign-ins were signed out"})
+
+
 def register_commands(subparsers):
     init = subparsers.add_parser("init-server", help="Initialize private server storage and credentials")
     common(init)
@@ -209,6 +229,11 @@ def register_commands(subparsers):
     project.add_argument("project", nargs="?")
     project.add_argument("--name", default="")
     project.set_defaults(func=projects)
+    password = subparsers.add_parser("set-password", help="Set the memory browser's sign-in password (administrator access)")
+    common(password)
+    password.add_argument("--stdin", action="store_true", help="Read the password from the first line of standard input")
+    password.add_argument("--disable", action="store_true", help="Remove the password and sign out every browser")
+    password.set_defaults(func=set_password)
     token = subparsers.add_parser("token", help="Issue or revoke per-computer credentials")
     common(token)
     token.add_argument("action", choices=["list", "create", "revoke"])

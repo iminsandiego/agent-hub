@@ -145,7 +145,7 @@ Automatic contradictory-memory detection, calibration of confidence scores, infe
 
 ## 9. API and MCP contract
 
-All `/v1` and `/mcp` access requires a bearer token. The health response and static browser shell contain no private history. Token secrets are high-entropy random values; only their digest is stored in the authentication database. Server-admin credentials are separate from normal per-computer read/write tokens.
+All `/mcp` access requires a bearer token. `/v1` access requires a bearer token or, for the browser only, a password sign-in session (below). The health response and static browser shell contain no private history. Token secrets are high-entropy random values; only their digest is stored in the authentication database. Server-admin credentials are separate from normal per-computer read/write tokens.
 
 | MCP tool | Purpose | Bounds and state |
 | --- | --- | --- |
@@ -159,7 +159,9 @@ An event response distinguishes normalized text from raw representation, gives t
 
 REST routes include health, scoped projects, ingestion, context, search, events, sessions, nodes, tree, memories, review, stats, and catalog. The endpoint is `/mcp` for Streamable HTTP. The stdio gateway exposes the same functional surface using the official SDK and authenticated REST calls.
 
-The service uses provisioned bearer credentials, not an OAuth authorization server. Clients that require OAuth discovery without configurable headers should use the local stdio gateway. There is no fabricated browser login or claim of complete MCP OAuth support.
+The service uses provisioned bearer credentials, not an OAuth authorization server. Clients that require OAuth discovery without configurable headers should use the local stdio gateway. There is no claim of complete MCP OAuth support.
+
+**Browser password (0.1.8).** People sign in to the browser with one server password, set locally with `agent-hub set-password` and stored as a salted scrypt hash in the authentication database. A correct password creates a 30-day server session: the browser holds its random secret only in an `HttpOnly`, `SameSite=Strict` cookie (also `Secure` when the page is served over HTTPS), named per port so tunnels to separate home/work servers do not collide; the database stores its digest. The session is the server administrator's browser credential with `*` scope and `admin` permission. It authenticates REST `/v1` requests only, never `/mcp`, so agents cannot use it. An explicit `Authorization` header is never replaced by the cookie. Sign-in, sign-out and every cookie-authenticated non-GET request must carry an `Origin` that is allowlisted or names the requested host; together with `SameSite=Strict` this prevents cross-site use. Wrong passwords are throttled server-wide after five attempts with an exponential delay of up to 15 minutes. Changing or disabling the password signs out every browser. Agent and per-computer tokens are unchanged, and a pasted token remains a supported browser fallback held only in page memory. Browsers do not isolate cookies by port, so another web service on the same host name as the tunnel could receive the cookie; use the HTTPS name for remote access where that matters.
 
 ## 10. Capture and native-client setup
 
@@ -177,7 +179,7 @@ The install flow creates a private client configuration and credential reference
 
 ## 11. Operational and security limits
 
-The service defaults to loopback. Remote use requires HTTPS termination or an SSH tunnel to a loopback endpoint, explicit allowed hosts, and explicit browser origins; a private network can additionally limit reachability. Agent Hub clients keep TLS validation enabled and reject off-host plaintext HTTP. The Python service does not itself provision certificates or enforce HTTPS behind a reverse proxy. A token is never placed in a URL, committed file, or ordinary log by the application. The browser keeps a supplied token in page memory, not persistent browser storage.
+The service defaults to loopback. Remote use requires HTTPS termination or an SSH tunnel to a loopback endpoint, explicit allowed hosts, and explicit browser origins; a private network can additionally limit reachability. Agent Hub clients keep TLS validation enabled and reject off-host plaintext HTTP. The Python service does not itself provision certificates or enforce HTTPS behind a reverse proxy. A token is never placed in a URL, committed file, or ordinary log by the application. The browser keeps a pasted token in page memory, not persistent browser storage; a password session is an `HttpOnly` cookie that page scripts cannot read.
 
 Request bodies are bounded before application parsing. Query strings, event fields, memory fields and result sizes have separate limits. SQL uses bound parameters; lexical search terms are escaped instead of interpreting arbitrary query syntax or regular expressions. The browser renders captured content as text and loads no third-party scripts.
 

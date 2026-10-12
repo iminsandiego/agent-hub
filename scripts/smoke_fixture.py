@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import tempfile
 from pathlib import Path
 
@@ -50,8 +51,12 @@ def main():
         _, token = app.state.auth.issue("Browser verification", ["*"], ["admin"])
         token_path = root / "test.token"
         write_private(token_path, token)
-        write_private(args.info_file, json.dumps({"url": f"http://127.0.0.1:{args.port}",
-                                                 "token_file": str(token_path), "candidate": candidate["id"]}), overwrite=True)
+        # Synthetic browser password, generated per run and kept in the private temporary directory.
+        password_path = root / "test.password"
+        write_private(password_path, "synthetic-" + secrets.token_urlsafe(18))
+        app.state.auth.set_password(password_path.read_text())
+        write_private(args.info_file, json.dumps({"url": f"http://127.0.0.1:{args.port}", "token_file": str(token_path),
+                                                 "password_file": str(password_path), "candidate": candidate["id"]}), overwrite=True)
         print(json.dumps({"synthetic_fixture": True, "info_file": str(args.info_file)}), flush=True)
         uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", access_log=False)
 
