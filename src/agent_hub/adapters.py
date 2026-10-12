@@ -79,6 +79,7 @@ class Transcript:
     complete_lines: int = 0
     unknown_types: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    observed_cwds: list[str] = field(default_factory=list)
 
 
 def _detect_client(records: list[tuple[int, int, str, Any]]) -> str:
@@ -245,6 +246,18 @@ def parse_jsonl(
         result.metadata["parent_session_id"] = parent_session
     unknown: set[str] = set()
     for ordinal, end, raw, item in records:
+        # Inspect only native metadata fields, never recursively interpret quoted
+        # documents or tool output as routing instructions. Keep raw unchanged.
+        directories = []
+        if isinstance(item, dict):
+            directories.append(item.get("cwd"))
+            if client == "codex" and item.get("type") in {"session_meta", "turn_context"}:
+                payload = item.get("payload", {})
+                if isinstance(payload, dict):
+                    directories.append(payload.get("cwd"))
+        for directory in directories:
+            if isinstance(directory, str) and directory and directory not in result.observed_cwds:
+                result.observed_cwds.append(directory)
         role, text, known = _normalize(item, client)
         if not known:
             unknown.add(str(item.get("type", "unknown")) if isinstance(item, dict) else "non_object")
@@ -396,6 +409,8 @@ def export_codex_thread(
             },
         )
         for turn in turns:
+            if isinstance(turn.get("cwd"), str) and turn["cwd"]:
+                result.observed_cwds.append(turn["cwd"])
             turn_id = str(turn.get("id", ""))
             if not turn_id:
                 raise AdapterError("A Codex turn has no stable ID.")
@@ -409,6 +424,8 @@ def export_codex_thread(
                     raise AdapterError("A Codex persisted item is not a JSON object.")
                 item_id = item.get("id") or f"ordinal:{ordinal}"
                 kind = item.get("type", "unknown")
+                if kind == "commandExecution" and isinstance(item.get("cwd"), str) and item["cwd"]:
+                    result.observed_cwds.append(item["cwd"])
                 role = "system"
                 if kind == "userMessage":
                     role = "user"

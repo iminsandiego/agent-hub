@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "url": "https://memory-work.example.com",
+  "machine_id": "replace-execution-host-work",
+  "domain": "work",
+  "strict_scope": true,
+  "allowed_projects": [
+    "work-atlas"
+  ],
+  "token_env": "AGENT_HUB_WORK_TOKEN",
+  "token_file": "/absolute/private/work/machine.token",
+  "project": null,
+  "mappings": [
+    {
+      "path": "/absolute/work/project",
+      "project": "work-atlas"
+    }
+  ],
+  "capture_paths": [],
+  "state_dir": "/absolute/private/work/state"
+}

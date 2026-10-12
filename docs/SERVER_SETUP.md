@@ -1,3 +1,5 @@
+For new home/work deployments, first read [domain separation](DOMAINS_AND_INGESTION.md). Deploy this guide independently in each approved domain; do not share data volumes, credentials or backups.
+
 # Install the memory server
 
 The server runs once on your always-on host. Every agent computer connects to this same service; do not give each computer a separate copy of the memory database.

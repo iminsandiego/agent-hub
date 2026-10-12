@@ -2,7 +2,9 @@
 
 A private home for your coding agents' shared memory, with one repository for the service, computer setup, and future MCP servers, plugins, and skills.
 
-**Status: initial implementation, version 0.1.1.** It includes an authenticated Python service, SQLite history, exact captured-record retrieval, project-scoped search, a binary summary tree, a memory browser, client capture/configuration tools, and optional bounded model enrichment. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md). Deployment and native-client checks that require your computers are explicitly distinguished from tests run in development.
+**Status: initial implementation, version 0.1.2.** It includes an authenticated Python service, SQLite history, exact captured-record retrieval, project-scoped search, a binary summary tree, a memory browser, client capture/configuration tools, and optional bounded model enrichment. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md). Deployment and native-client checks that require your computers are explicitly distinguished from tests run in development.
+
+**Home/work separation:** deploy independent domain servers and native profiles. Version 0.1.2 adds server domain guards, strict client project allowlists, cross-project transcript checks and a local backfill planner. Read [the deployment and ingestion design](docs/DOMAINS_AND_INGESTION.md) before configuring mixed-use computers. No production histories have been imported.
 
 ## What it does
 
@@ -31,14 +33,14 @@ cd agent-hub
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.lock
 .venv/bin/python -m pip install --no-deps -e .
-.venv/bin/agent-hub init-server --data-dir "$HOME/.local/share/agent-hub" --project atlas --project harbor --project personal
+.venv/bin/agent-hub init-server --data-dir "$HOME/.local/share/agent-hub" --domain home --project home-garden --project home-finance --project home-lab
 .venv/bin/agent-hub serve --server-config "$HOME/.local/share/agent-hub/server.json"
 ```
 
 Open `http://127.0.0.1:8765` on that host. Initialization writes an administrative token to the printed private file; the token itself is not printed. Use it locally to inspect and review memories. Create separate project-scoped credentials for agent computers.
 
 ```bash
-.venv/bin/agent-hub token create --data-dir "$HOME/.local/share/agent-hub" --name owner-laptop --project atlas --project harbor --output "$HOME/owner-laptop.token"
+.venv/bin/agent-hub token create --data-dir "$HOME/.local/share/agent-hub" --name owner-laptop-home --project home-garden --output "$HOME/owner-laptop.token"
 ```
 
 Transfer that token to its intended computer through your trusted channel. The repository must never contain the token, transcripts, memory database, or runtime configuration. Token management and [backup/restore](docs/OPERATIONS.md) are local administration commands.
@@ -59,13 +61,13 @@ The [new-computer guide](docs/CLIENTS.md) contains the exact commands, hook payl
 No external model call happens by default. The local worker can propose memories from explicit instruction/decision markers:
 
 ```bash
-.venv/bin/agent-hub worker --data-dir "$HOME/.local/share/agent-hub" --project atlas --once
+.venv/bin/agent-hub worker --data-dir "$HOME/.local/share/agent-hub" --project home-garden --once
 ```
 
 For optional semantic summaries/extraction, set `AGENT_HUB_LLM_URL` to an OpenAI-compatible `/v1` base URL, `AGENT_HUB_LLM_MODEL` to a compatible model you choose, and `AGENT_HUB_LLM_KEY` when the endpoint requires it. Then run:
 
 ```bash
-.venv/bin/agent-hub worker --data-dir "$HOME/.local/share/agent-hub" --project atlas --llm --once --max-calls 10
+.venv/bin/agent-hub worker --data-dir "$HOME/.local/share/agent-hub" --project home-garden --llm --once --max-calls 10
 ```
 
 Each attempted HTTP model request, including shortening retries, counts toward that cap. Usage returned by the provider is recorded locally. An unlimited LLM worker loop is deliberately not implemented. Inputs over the worker's 24,000-character bound are recorded as blocked; their archived records and deterministic excerpts remain available while later records and unrelated tree branches can progress. `worker-status` shows these items, and `--retry-blocked` explicitly reconsiders them after a change that can handle their size. See [operations](docs/OPERATIONS.md) for privacy, bounds, recovery, and model compatibility.

@@ -96,10 +96,25 @@ class ClientConfig:
     mappings: list[dict[str, str]] = field(default_factory=list)
     capture_paths: list[str] = field(default_factory=list)
     state_dir: str | None = None
+    domain: str | None = None
+    allowed_projects: list[str] = field(default_factory=list)
+    strict_scope: bool = False
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ClientError("Unsupported client configuration schema_version.")
+        if not isinstance(self.strict_scope, bool):
+            raise ClientError("strict_scope must be a boolean.")
+        if self.domain is not None and self.domain not in {"home", "work"}:
+            raise ClientError("domain must be home, work, or null.")
+        if not isinstance(self.allowed_projects, list):
+            raise ClientError("allowed_projects must be a list.")
+        for allowed in self.allowed_projects:
+            validate_project(allowed)
+            if self.domain and not allowed.startswith(self.domain + "-"):
+                raise ClientError("Allowed projects must use the profile domain prefix.")
+        if self.strict_scope and (not self.domain or not self.allowed_projects or self.project):
+            raise ClientError("Strict profiles require a domain, explicit allowed_projects, and no default project.")
         self.url = validate_url(self.url)
         if not isinstance(self.machine_id, str) or not self.machine_id.strip() or len(self.machine_id) > 128:
             raise ClientError("Set a stable, nonempty machine_id for this installation.")
@@ -119,6 +134,7 @@ class ClientConfig:
             raise ClientError("capture_paths must be a list of directory or JSONL file paths.")
         for mapping in self.mappings:
             validate_project(mapping["project"])
+            self.check_project(mapping["project"])
             path = mapping["path"]
             if not Path(path).expanduser().is_absolute() and not PureWindowsPath(path).is_absolute():
                 raise ClientError("Project mapping paths must be absolute (or start with ~).")
@@ -157,7 +173,7 @@ class ClientConfig:
 
     def resolve_project(self, cwd: str | None = None, explicit: str | None = None) -> str:
         if explicit:
-            return validate_project(explicit)
+            return self.check_project(explicit)
         if cwd:
             current = _normalized_path(cwd)
             matches: list[tuple[int, str]] = []
@@ -170,10 +186,33 @@ class ClientConfig:
                 projects = {project for length, project in matches if length == longest}
                 if len(projects) != 1:
                     raise ClientError("Conflicting equally specific project mappings; correct client.json.")
-                return projects.pop()
+                return self.check_project(projects.pop())
         if self.project:
-            return self.project
+            return self.check_project(self.project)
         raise ClientError("No project mapping matches this session; add an explicit mapping or pass --project.")
+
+    def check_project(self, project: str) -> str:
+        validate_project(project)
+        if self.domain and not project.startswith(self.domain + "-"):
+            raise ClientError("Project is outside this profile's domain.")
+        if self.allowed_projects and project not in self.allowed_projects:
+            raise ClientError("Project is outside this profile's allowlist.")
+        return project
+
+    def check_transcript(self, transcript: Transcript, target: str, hook_cwd: str | None = None) -> None:
+        self.check_project(target)
+        if not self.strict_scope:
+            return
+        observed = set(transcript.observed_cwds)
+        if transcript.cwd:
+            observed.add(transcript.cwd)
+        if hook_cwd:
+            observed.add(hook_cwd)
+        if not observed:
+            raise ClientError("Strict capture requires mapped source working-directory evidence.")
+        for directory in observed:
+            if self.resolve_project(directory) != target:
+                raise ClientError("Transcript crosses project boundaries; preserve it for review before importing.")
 
     def local_state_dir(self) -> Path:
         return Path(self.state_dir).expanduser() if self.state_dir else default_config_path().parent / "state"
@@ -209,6 +248,7 @@ class MemoryClient:
         return response.json()
 
     def project_path(self, project: str, suffix: str) -> str:
+        self.config.check_project(project)
         return f"v1/projects/{quote(project, safe='')}/{suffix}"
 
     def context(self, project: str, budget_chars: int = 8000, query: str | None = None) -> dict[str, Any]:
@@ -228,6 +268,7 @@ class MemoryClient:
         return self.request("GET", path, params={"offset": offset, "limit": limit, "representation": representation, "max_chars": max_chars})
 
     def ingest(self, project: str, transcript: Transcript, events: list[dict[str, Any]]) -> Any:
+        self.config.check_transcript(transcript, project)
         clean = [{k: v for k, v in event.items() if not k.startswith("_")} for event in events]
         wire_client = {"jsonl": "generic", "codex-app-server": "codex"}.get(transcript.client, transcript.client)
         return self.request("POST", "v1/ingest", json={
@@ -376,6 +417,7 @@ def ingest_file(
     stat = source.stat()
     transcript = parse_jsonl(data, client=client, machine=config.machine_id, path=str(source), session_id=session_id, cwd=cwd, final=final)
     target = config.resolve_project(transcript.cwd, project)
+    config.check_transcript(transcript, target, cwd)
     identifier = file_key(config, source, client, session_id)
     previous = state.checkpoint(identifier)
     offset = previous["offset"] if previous else 0
@@ -410,6 +452,7 @@ def ingest_file(
 def ingest_codex_thread(config: ClientConfig, thread_id: str, *, project: str | None = None, executable: str = "codex", memory: MemoryClient | None = None) -> dict[str, Any]:
     transcript = export_codex_thread(thread_id, machine=config.machine_id, executable=executable)
     target = config.resolve_project(transcript.cwd, project)
+    config.check_transcript(transcript, target)
     owned = memory is None
     connection = memory or MemoryClient(config)
     inserted = duplicates = 0

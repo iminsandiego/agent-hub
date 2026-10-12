@@ -4,6 +4,8 @@ Agent Hub keeps history on your server. Each computer runs a small local client 
 
 Start with the [server guide](SERVER_SETUP.md). You need its HTTPS URL and a separate, revocable project-scoped token for this computer. A local SSH tunnel to a loopback HTTP endpoint also works. Agent Hub verifies TLS; remote plain HTTP is rejected.
 
+For mixed home/work use, follow [domain setup and ingestion](DOMAINS_AND_INGESTION.md) first. The legacy examples below illustrate mechanics; use domain-prefixed projects, separate profiles and explicit allowlists for new installs.
+
 ## Install on a new computer
 
 ### macOS or Linux

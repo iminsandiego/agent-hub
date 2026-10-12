@@ -1,5 +1,22 @@
 # Validation evidence
 
+## Version 0.1.2 domain separation · 11 October 2026 (America/Los_Angeles)
+
+Recovered the complete 0.1.1 ZIP from the original conversation's download control. Original archive: 739,014 bytes, SHA-256 `14194748e6753271cf3abae554131dcf3e069fe64a3d0ce75253bc954f16ab82`. Local tag `v0.1.1` preserves its source tree as recovered; the original author's reported checks below are historical evidence, not re-executed 0.1.1 claims.
+
+Current validation ran on macOS arm64 with bundled Python 3.12.14. Runtime dependencies installed with `pip install --require-hashes -r requirements.lock`; test tools installed from the development extra.
+
+- Full suite: **253 passed**, one existing Starlette/httpx deprecation warning, in 3.52 seconds. Includes 17 new profile/domain/backfill tests and the actual stdio/HTTP MCP round trip. The first restricted execution passed 235 tests and failed one temporary socket bind because of sandbox permissions; the authorized full execution above passed all 253.
+- New behavior: invalid strict profiles, explicit-project bypass, Codex/Claude/generic mixed-project sources, absent source evidence, hook-cwd disagreement, local memory tool denial before credentials/network, raw preservation, local planner with no queue/token/network, overwrite protection, REST/MCP cross-domain denial even for admin, mixed database startup refusal and CLI setup round-trip.
+- Standard isolated package build: 0.1.2 source distribution and universal Python wheel succeeded using setuptools 84.0.0. An initial no-isolation attempt had no setuptools backend; the standard isolated build resolved it.
+- Second fresh environment: locked runtime installation, wheel installation without dependency resolution, `pip check` reports **No broken requirements found**.
+- Installed-wheel smoke: imported 0.1.2 from the second environment's site-packages, started a real temporary localhost service, served browser assets, verified unauthenticated denial, created a strict home profile, planned and captured synthetic history, retrieved its exact raw record, and verified denial for work projects including administrator project creation. Process stopped and temporary data removed. No real transcripts or paid models were used.
+
+The UI and static assets are unchanged; the browser screenshots below remain earlier evidence. A native installed Codex/Claude/T3 lifecycle session, Windows execution, permanent host, private-network routing, live model provider, retention lifecycle and production backfill have **not** been validated in this release. A collector is not DLP: cwd checks cannot classify pasted data or omitted native metadata.
+
+GitHub connector identified `iminsandiego` but listed zero installations/repositories and exposes no repository-creation action. Initial local CLI credentials were invalid and SSH had no accepted key. The user refreshed CLI authentication; it now verifies `iminsandiego` with repo scope. Publication and remote CI are separate release gates; the final publication receipt records their actual results.
+
+
 ## Version 0.1.1 correction review · 8 October 2026 UTC
 
 The cache correction release was checked with **CPython 3.12.14 on Linux x86_64**, using a newly created environment and the unchanged hash-locked runtime dependency set. The complete revised suite passed **236 tests**, with one existing upstream deprecation warning, in **5.44 seconds**. The focused worker/admin run passed **53 tests in 0.81 seconds**.

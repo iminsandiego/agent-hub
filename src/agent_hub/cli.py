@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .adapters import AdapterError
+from .adapters import AdapterError, parse_jsonl
 from .client import (
     ClientConfig, ClientError, LocalState, MemoryClient, atomic_write,
     bounded_context, create_gateway, default_config_path, discover_paths, drain_queue,
@@ -59,6 +59,9 @@ def configure(args: argparse.Namespace) -> int:
         mappings=[{"path": path, "project": project} for path, project in mapping.items()],
         capture_paths=paths,
         state_dir=args.state_dir or (existing.state_dir if existing else str(target.parent / "state")),
+        domain=args.domain or (existing.domain if existing else None),
+        allowed_projects=args.allow_project if args.allow_project is not None else (existing.allowed_projects if existing else []),
+        strict_scope=args.strict_scope or (existing.strict_scope if existing else False),
     )
     # Validate the entire prospective configuration before rotating a credential.
     # An invalid URL or project mapping must leave a working installation intact.
@@ -167,6 +170,50 @@ def ingest(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def plan_import(args: argparse.Namespace) -> int:
+    """Inventory selected files locally, without tokens, queue writes or uploads."""
+    import hashlib
+    config = config_for(args)
+    paths = set()
+    for selected in args.paths:
+        root = Path(selected).expanduser().resolve()
+        candidates = root.rglob("*.jsonl") if root.is_dir() else [root]
+        for path in candidates:
+            resolved = path.resolve()
+            if root.is_dir() and not resolved.is_relative_to(root):
+                continue
+            paths.add(resolved)
+    records = []
+    counts = {}
+    for path in sorted(paths):
+        entry = {"path": str(path), "status": "blocked"}
+        try:
+            data = path.read_bytes()
+            entry.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+            transcript = parse_jsonl(data, client=args.client, machine=config.machine_id,
+                                     path=str(path), final=args.final)
+            project = config.resolve_project(transcript.cwd)
+            config.check_transcript(transcript, project)
+            entry.update(project=project, session_id=transcript.session_id,
+                         records=len(transcript.events), pending_bytes=transcript.pending_bytes,
+                         unknown_types=transcript.unknown_types,
+                         status="pending" if transcript.pending_bytes else "ready")
+            counts[project] = counts.get(project, 0) + 1
+        except (OSError, ClientError, AdapterError) as exc:
+            entry["reason"] = str(exc) if isinstance(exc, (ClientError, AdapterError)) else type(exc).__name__
+        records.append(entry)
+    report = {"uploaded": False, "queued": False, "domain": config.domain,
+              "counts": counts, "sources": records}
+    if args.output:
+        from .config import write_private
+        write_private(Path(args.output).expanduser().resolve(), json.dumps(report, indent=2) + "\n")
+        output({"report": str(Path(args.output).expanduser().resolve()), "counts": counts,
+                "blocked": sum(r["status"] == "blocked" for r in records), "uploaded": False})
+    else:
+        output(report)
+    return 0
+
+
 def watch(args: argparse.Namespace) -> int:
     config = config_for(args)
     if not 1 <= args.poll_seconds <= 60:
@@ -250,6 +297,9 @@ def register_commands(subparsers) -> None:
     configure_parser.add_argument("--map", action="append", metavar="PATH=PROJECT")
     configure_parser.add_argument("--capture-path", action="append")
     configure_parser.add_argument("--state-dir")
+    configure_parser.add_argument("--domain", choices=["home", "work"])
+    configure_parser.add_argument("--allow-project", action="append", help="Replace the profile project allowlist; repeat for every allowed project")
+    configure_parser.add_argument("--strict-scope", action="store_true", help="Require mapped source cwd evidence throughout each transcript")
     configure_parser.set_defaults(func=configure)
     setup_parser = subparsers.add_parser("setup", help="Merge MCP configuration and lifecycle hooks into local clients")
     setup_parser.add_argument("--clients", nargs="+", choices=["codex", "claude", "t3"], default=["codex", "claude"])
@@ -274,6 +324,12 @@ def register_commands(subparsers) -> None:
     importer.add_argument("--thread")
     importer.add_argument("--codex-bin", default="codex")
     importer.set_defaults(func=ingest)
+    planner = subparsers.add_parser("plan-import", help="Inventory selected JSONL sources locally without queueing or uploading")
+    planner.add_argument("paths", nargs="+")
+    planner.add_argument("--client", choices=["auto", "codex", "claude", "jsonl"], default="auto")
+    planner.add_argument("--final", action="store_true")
+    planner.add_argument("--output", help="Write a new private inventory file; existing files are preserved")
+    planner.set_defaults(func=plan_import)
     watcher = subparsers.add_parser("watch", help="Drain durable capture jobs and watch configured transcript paths")
     watcher.add_argument("--once", action="store_true")
     watcher.add_argument("--no-scan", action="store_true")

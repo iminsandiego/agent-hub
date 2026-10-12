@@ -32,6 +32,10 @@ def common(parser):
 
 def init_server(args):
     settings = settings_for(args)
+    settings.domain = args.domain or settings.domain
+    selected = args.project or [settings.domain + "-personal" if settings.domain else "personal"]
+    for project in selected:
+        settings.check_project(project)
     if args.host:
         settings.host = args.host
     path = settings.data_dir / "server.json"
@@ -39,13 +43,13 @@ def init_server(args):
     if path.exists() or settings.auth_database.exists() or token_path.exists():
         raise ValueError("Server is already initialized; existing data and credentials were left intact")
     store = Store(settings.database)
-    for project in args.project or ["personal"]:
+    for project in selected:
         store.create_project(project)
     token_id, token = AuthStore(settings.auth_database).issue("local-administrator", ["*"], ["admin"])
     write_private(token_path, token + "\n")
     write_private(path, settings.model_dump_json(indent=2) + "\n")
     output({"server_config": str(path), "admin_token_file": str(token_path), "token_id": token_id,
-            "projects": args.project or ["personal"], "next": "Issue a separate scoped token for each computer"})
+            "projects": selected, "next": "Issue a separate scoped token for each computer"})
 
 
 def serve(args):
@@ -59,10 +63,12 @@ def serve(args):
 
 
 def projects(args):
-    store = Store(settings_for(args).database)
+    settings = settings_for(args)
+    store = Store(settings.database)
     if args.action == "create":
         if not args.project:
             raise ValueError("project create requires a project identifier")
+        settings.check_project(args.project)
         output(store.create_project(args.project, args.name))
     else:
         output(store.list_projects())
@@ -82,6 +88,7 @@ def tokens(args):
         if not args.name or not args.project or not args.output:
             raise ValueError("token create requires --name, one or more --project, and --output")
         for project in args.project:
+            settings.check_project(project)
             if project == "*":
                 raise ValueError("Client token creation requires explicit projects; use the existing local admin token for administration")
             known = Store(settings.database).list_projects()
@@ -175,6 +182,7 @@ def register_commands(subparsers):
     common(init)
     init.add_argument("--project", action="append")
     init.add_argument("--host")
+    init.add_argument("--domain", choices=["home", "work"])
     init.set_defaults(func=init_server)
     server = subparsers.add_parser("serve", help="Serve the REST API, memory browser and MCP")
     common(server)

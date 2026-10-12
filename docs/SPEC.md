@@ -1,12 +1,14 @@
 # Agent Hub — tailored implementation specification
 
-Version 0.1.1 · 8 October 2026 UTC
+Version 0.1.2 · 11 October 2026 (America/Los_Angeles)
 
 This is the implementation contract for the owner's shared agent infrastructure. It incorporates the useful historical-memory structure from UniiChat (formerly OptChat) while accounting for native coding clients, multiple computers, multiple repositories per project, local device access, and durable evidence. The separate [upstream analysis](UPSTREAM_ANALYSIS.md) records what was actually read and corrects claims from the earlier conversation.
 
+The [home/work and ingestion contract](DOMAINS_AND_INGESTION.md) supplements this specification and supersedes examples using one mixed-domain service. Existing 0.1.1 archive identities and payloads remain compatible; strict domain deployment uses new domain-prefixed project IDs without silently reassigning existing history.
+
 ## 1. Outcome and scope
 
-One private GitHub repository holds the application, reproducible installation instructions, and the future integration catalog. One service on the owner's server holds memory. Each authorized computer gets a local client and its own project-scoped token. Codex, Claude Code, and the providers used by T3 can access the same memory through MCP.
+One private GitHub repository holds the application, reproducible installation instructions, and the future integration catalog. Independent home and employer-approved work service instances hold their respective memory. Each authorized computer gets a local client and its own project-scoped token. Codex, Claude Code, and the providers used by T3 can access the same memory through MCP.
 
 The first implementation must support:
 

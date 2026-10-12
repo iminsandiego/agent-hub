@@ -28,7 +28,7 @@ principal_context: ContextVar[Principal | None] = ContextVar("agent_hub_principa
 PROJECT_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
-def authorize(project: str, permission: str = "read") -> Principal:
+def authorize_principal(project: str, permission: str = "read") -> Principal:
     principal = principal_context.get()
     if not PROJECT_PATTERN.fullmatch(project):
         raise ValueError("Invalid project identifier")
@@ -111,6 +111,15 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
     settings = settings or load_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     store, auth = Store(settings.database), AuthStore(settings.auth_database)
+    for existing in store.list_projects():
+        settings.check_project(existing.get("project", existing.get("id", "")))
+
+    def authorize(project: str, permission: str = "read") -> Principal:
+        try:
+            settings.check_project(project)
+        except ValueError as exc:
+            raise PermissionError("Access denied for this server domain") from exc
+        return authorize_principal(project, permission)
     host_allow = []
     for host in settings.allowed_hosts:
         host_allow.extend([host, host + ":*"])
@@ -227,6 +236,7 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         principal = principal_context.get()
         if not principal or not principal.admin:
             raise PermissionError("Administrative token required")
+        authorize(value.project, "admin")
         return await run(store.create_project, value.project, value.name)
 
     @app.post("/v1/ingest")

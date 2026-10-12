@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class ServerSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: int = 1
+    domain: Literal["home", "work"] | None = None
     data_dir: Path = Field(default_factory=lambda: Path.home() / ".local/share/agent-hub")
     host: str = "127.0.0.1"
     port: int = Field(default=8765, ge=1, le=65535)
@@ -41,6 +43,10 @@ class ServerSettings(BaseModel):
     @property
     def database(self) -> Path:
         return self.data_dir / "memory.sqlite3"
+
+    def check_project(self, project: str) -> None:
+        if self.domain and not project.startswith(self.domain + "-"):
+            raise ValueError("Project is outside this server's domain")
 
     @property
     def auth_database(self) -> Path:
