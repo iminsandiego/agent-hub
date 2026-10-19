@@ -34,6 +34,15 @@ summaries and avoiding a full archive rebuild. Surviving event IDs and sequence 
 content-free gap markers preserve the tree's navigation. Stale model-worker
 summary/extraction completions are rejected using a privacy revision.
 
+One derived path is not reset: when the optional model worker summarizes a later
+record, it shows the model a short summary of earlier history as context. If that
+model copied a detail from the forgotten chat into a later record's summary (for
+example to resolve "that path"), the later summary keeps it. Only model-written
+summaries created after the forgotten chat was captured and before it was
+forgotten can be affected; with the worker never enabled, none are. To remove any
+such copy, rebuild the project's summaries (`agent-hub rebuild`), which resets all
+model summaries to excerpts of the surviving records.
+
 A separate private SQLite exclusion ledger stores hashed session identities,
 project, mode and proven relationships, without chat text, titles or prompts.
 The server records policy durably before purging. The ledger survives an archive

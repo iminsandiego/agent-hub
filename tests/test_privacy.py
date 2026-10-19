@@ -310,3 +310,16 @@ def test_online_backup_pins_snapshot_without_blocking_capture(store, tmp_path, m
         assert con.execute('SELECT id FROM events').fetchone()[0] == original['event_ids'][0]
         assert con.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     assert Path(receipt['privacy_ledger']).exists()
+
+
+def test_a_temp_marker_typed_while_claude_is_busy_excludes_the_chat(store):
+    first = event('ordinary question', identifier='one')
+    assert capture(store, 'busy', client='claude', events=[first])['inserted'] == 1
+    queued = {'type': 'attachment', 'sessionId': 'busy', 'attachment': {'type': 'queued_command', 'prompt': '[temp] privacyCanary'}}
+    later = dict(event_id='two', role='system', text='Unsupported Claude record (attachment); raw source retained.', raw=json.dumps(queued))
+    receipt = capture(store, 'busy', client='claude', events=[later])
+    assert receipt['suppressed'] == 'temporary'
+    assert store.list_sessions('home') == [] and store.search('home', 'ordinary question') == []
+    # A queued prompt that merely mentions the marker later in its text is not an opt-out.
+    other = {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': 'use [temp] next time'}}
+    assert capture(store, 'other', client='claude', events=[dict(event_id='x', role='system', text='t', raw=json.dumps(other))])['inserted'] == 1

@@ -561,3 +561,27 @@ def test_official_sdk_stdio_round_trip_to_http(cfg, tmp_path):
         thread.join(timeout=2)
     assert requests[0][0].startswith("/v1/projects/atlas/context?")
     assert requests[0][1] == "Bearer synthetic-test-token"
+
+
+def test_upload_jobs_run_in_the_order_they_were_queued(cfg):
+    state = LocalState(cfg)
+    paths = [f"/synthetic/session-{name}.jsonl" for name in ("2019", "2021", "2024", "2026")]
+    for path in paths:
+        state.enqueue({"kind": "file", "path": path, "client": "auto"})
+    assert [json.loads(job["payload"])["path"] for job in state.due_jobs()] == paths
+
+
+def test_discovered_transcripts_queue_oldest_first(cfg, tmp_path):
+    import os
+    from agent_hub.client import discover_paths
+    root = tmp_path / "history"
+    root.mkdir()
+    for index, name in enumerate(["zeta", "alpha", "mid"]):
+        path = root / f"{name}.jsonl"
+        path.write_text("{}\n")
+        os.utime(path, ns=(1_600_000_000_000_000_000 + index, 1_600_000_000_000_000_000 + index))
+    cfg.capture_paths = [str(root)]
+    state = LocalState(cfg)
+    discover_paths(cfg, state)
+    queued = [Path(json.loads(job["payload"])["path"]).name for job in state.due_jobs()]
+    assert queued == ["zeta.jsonl", "alpha.jsonl", "mid.jsonl"]

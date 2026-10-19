@@ -350,7 +350,7 @@ class LocalState:
 
     def due_jobs(self, *, now: float | None = None, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM jobs WHERE next_attempt<=? ORDER BY next_attempt,id LIMIT ?", (time.time() if now is None else now, limit)).fetchall()
+            rows = db.execute("SELECT * FROM jobs WHERE next_attempt<=? ORDER BY next_attempt,rowid LIMIT ?", (time.time() if now is None else now, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def completed(self, job: dict[str, Any]) -> None:
@@ -560,11 +560,21 @@ def cached_context(state: LocalState, key: str) -> str:
     return ""
 
 
+def _oldest_first(paths) -> list[Path]:
+    """Queue discovered transcripts by age so backfilled history keeps its order."""
+    def age(path: Path):
+        try:
+            return (path.stat().st_mtime_ns, str(path))
+        except OSError:
+            return (0, str(path))
+    return sorted(paths, key=age)
+
+
 def discover_paths(config: ClientConfig, state: LocalState) -> int:
     queued = 0
     for configured in config.capture_paths:
         root = Path(configured).expanduser().resolve()
-        candidates = [root] if root.is_file() else root.rglob("*.jsonl") if root.is_dir() else []
+        candidates = [root] if root.is_file() else _oldest_first(root.rglob("*.jsonl")) if root.is_dir() else []
         for candidate in candidates:
             try:
                 resolved = candidate.resolve()

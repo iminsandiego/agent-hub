@@ -1,3 +1,17 @@
+## 0.1.9 fixes from the UniiChat comparison, October 19, 2026
+
+UniiChat source (github.com/VictorTaelin/UniiChat, commit 0500bf6) was read as data; none of its code was run. Each Agent Hub bug below was reproduced with a synthetic test that fails on 0.1.8 and passes now:
+
+- 8,000-character context for 1,000 records covered records 985–999 only; it now covers 0–999 with no gaps (`tests/test_store.py`).
+- A context with 60 active multi-byte notes measured 168,089 bytes on 0.1.8, over the 160,000-byte result guard; now at most 140,000.
+- A summary answer always over 512 bytes made every run spend calls on one node and summarize nothing; an oversized record kept the root extractive; fenced extraction JSON stalled extraction (`tests/test_worker.py`).
+- A queued `[temp]` Claude prompt did not exclude the chat (`tests/test_privacy.py`).
+- Upload jobs and discovered files did not run oldest first (`tests/test_clients.py`).
+
+Linux, CPython 3.13.16: `PYTHONPATH=src python -m pytest -q` ran 326 tests, 325 passed. The one failure, `test_client_against_real_authenticated_service_contract`, is the environment-specific httpx mock-transport failure also recorded in the two entries below. `scripts/browser-smoke.cjs` passed its 27 checks against the synthetic fixture. The deployed home VM was not exercised.
+
+---
+
 ## 0.1.8 browser password sign-in, October 12, 2026
 
 Linux, CPython 3.13.16: `PYTHONPATH=src python -m pytest -q` ran 309 tests, 308

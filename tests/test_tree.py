@@ -74,3 +74,19 @@ def test_rejects_gaps_and_invalid_merges():
         select_frontier([make_leaf("p", 1, "gap")])
     with pytest.raises(ValueError):
         select_frontier([], 0)
+
+
+def test_merged_excerpts_show_the_first_and_the_last_event_of_a_range():
+    from agent_hub.tree import build_tree
+    events = [{"sequence": i, "text": f"START{i} " + "x" * 2000 + f" END{i}", "role": "user"} for i in range(8)]
+    root = [node for node in build_tree("p", events) if (node["lo"], node["hi"]) == (0, 7)][0]
+    assert "START0" in root["summary"] and "END7" in root["summary"]
+    assert len(root["summary"].encode("utf-8")) <= 512
+
+
+def test_a_long_single_record_keeps_its_start_and_its_end():
+    from agent_hub.tree import make_leaf
+    leaf = make_leaf("p", 0, "Command started\n" + "log line\n" * 500 + "EXIT STATUS 1: tests failed", role="tool")
+    assert leaf["mode"] == "extractive"
+    assert "Command started" in leaf["summary"] and "EXIT STATUS 1: tests failed" in leaf["summary"]
+    assert "[…]" in leaf["summary"] and len(leaf["summary"].encode("utf-8")) <= 512

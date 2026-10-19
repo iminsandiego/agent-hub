@@ -332,3 +332,36 @@ def test_session_list_previews_the_first_typed_request_and_source_span(store):
     assert sessions["tool-only"]["preview"] == "Tool output only"
     assert sessions["tool-only"]["first_timestamp"] is None
     assert len(store.list_sessions("alpha")[0]["preview"]) <= 240
+
+
+@pytest.mark.parametrize("budget", [8000, 24000, 64000])
+def test_context_history_covers_every_event_once_with_recent_detail(store, budget):
+    for batch in range(10):
+        ingest(store, [event(i, f"Event {batch * 100 + i} " + "word " * 60) for i in range(100)], session=f"s{batch}")
+    pack = store.context("alpha", budget)
+    nodes = sorted((n["lo"], n["hi"]) for n in (json.loads(line) for line in pack["text"].splitlines()
+                                                if '"historical_tree_excerpt"' in line))
+    assert nodes[0][0] == 0 and nodes[-1][1] == 999
+    assert all(a[1] + 1 == b[0] for a, b in zip(nodes, nodes[1:]))
+    assert nodes[-1] == (999, 999)  # the newest event is shown on its own
+    assert pack["char_count"] <= budget and not pack["truncated"]
+
+
+def test_context_keeps_the_newest_history_when_even_the_roots_do_not_fit(store):
+    for batch in range(10):
+        ingest(store, [event(i, f"Event {batch * 100 + i} " + "word " * 60) for i in range(100)], session=f"s{batch}")
+    pack = store.context("alpha", 2000)
+    nodes = [json.loads(line) for line in pack["text"].splitlines() if '"historical_tree_excerpt"' in line]
+    assert pack["truncated"] and pack["char_count"] <= 2000
+    assert max(node["hi"] for node in nodes) == 999
+
+
+def test_context_respects_the_result_byte_guard_for_multibyte_text(store):
+    for batch in range(4):
+        ingest(store, [event(i, "記録" * 800) for i in range(64)], session=f"cjk{batch}")
+    for index in range(60):
+        note = store.add_memory("alpha", f"{index}決定" + "決定" * 690, "decision", [])
+        store.review_memory("alpha", note["id"], "active")
+    pack = store.context("alpha", 64000)
+    assert len(pack["active_memory_ids"]) > 10
+    assert 120_000 < len(pack["text"].encode("utf-8")) <= 140_000

@@ -1,6 +1,7 @@
 """Content-free exclusions, kept separately so archive restores cannot undo them."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -9,10 +10,28 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+_MARKER = re.compile(r"^\s*\[(?:temp|temporary)\](?:\s|$)", re.I)
+
+
 def temporary_message(events: list[dict]) -> bool:
-    return any(e.get("role") == "user" and isinstance(e.get("text"), str)
-               and re.match(r"^\s*\[(?:temp|temporary)\](?:\s|$)", e["text"], re.I)
+    return any((e.get("role") == "user" and isinstance(e.get("text"), str) and _MARKER.match(e["text"]))
+               or _queued_prompt_marked(e.get("raw"))
                for e in events)
+
+
+def _queued_prompt_marked(raw) -> bool:
+    """A prompt typed while Claude Code is busy is saved as a queued-command
+    attachment, not a user record. It is still the user's own message."""
+    if not isinstance(raw, str) or "queued_command" not in raw:
+        return False
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return False
+    attachment = record.get("attachment") if isinstance(record, dict) else None
+    return (isinstance(record, dict) and record.get("type") == "attachment" and isinstance(attachment, dict)
+            and attachment.get("type") == "queued_command" and isinstance(attachment.get("prompt"), str)
+            and bool(_MARKER.match(attachment["prompt"])))
 
 
 class PrivacyLedger:
