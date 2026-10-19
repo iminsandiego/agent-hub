@@ -70,7 +70,8 @@ def test_boundary_scan_preserves_original_records(tmp_path):
     raw = json.dumps({'type':'session_meta','payload':{'id':'one','cwd':str(tmp_path/'garden')}})
     transcript = parse_jsonl((raw+'\n').encode(),machine='test',path='one.jsonl')
     assert transcript.events[0]['raw'] == raw
-    assert transcript.metadata['adapter_version'] == 1
+    assert transcript.metadata['adapter_version'] == 2  # new sessions use the current parser
+    assert parse_jsonl((raw+'\n').encode(),machine='test',path='one.jsonl',adapter_version=1).metadata['adapter_version'] == 1
     assert 'observed_cwds' not in transcript.metadata
 
 def test_local_plan_has_no_queue_or_credentials(tmp_path):

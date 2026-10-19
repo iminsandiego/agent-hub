@@ -270,6 +270,22 @@ The watcher resolves transcript `cwd` through your mappings. Configured roots au
 
 Each accepted complete JSONL record retains its exact decoded UTF-8 JSON text, including internal spacing, Unicode, and unknown fields. Line delimiters are not part of event `raw`. Blank separator lines affect record ordinals but do not create events. An unterminated final line is deferred while watching; use `ingest --final` only for a finished export. Malformed complete records produce a visible error and are never silently discarded. This is exact record recovery, not byte-for-byte reconstruction of the entire original file or external attachments.
 
+### Parser versions (0.1.9)
+
+A transcript keeps the parser version its session was first captured with, so a replay after a lost checkpoint reproduces the archived text exactly. Sessions captured before 0.1.9 stay on version 1. New sessions use version 2, which corrects roles and searchable text:
+
+| Client | Record | Version 1 | Version 2 |
+| --- | --- | --- | --- |
+| Codex | `event_msg` copy of a user, assistant or reasoning message | Second copy with the same text | `system` placeholder; the `response_item` keeps the text |
+| Codex | Injected `# AGENTS.md …` or `<environment_context>` user item | `user` | `system`, text kept |
+| Codex | `custom_tool_call` (`apply_patch`), `local_shell_call`, `web_search_call` | Tool name only | Name plus patch, command or query |
+| Claude Code | `isMeta` or `isCompactSummary` user record | `user` | `system`, text kept |
+| Claude Code | Subagent (`isSidechain`) prompt | `user` | `assistant` (the parent agent wrote it) |
+| Claude Code | Prompt typed while busy (`queued_command` attachment) | Unsupported `system` record | `user`, its prompt |
+| Claude Code | `<local-command-stdout>`/`<bash-stdout>` output | `user` | `tool` |
+
+Each file's version is stored in its local checkpoint. When a new file's session already exists on the server under version 1 (a lost checkpoint, or the same transcript found again), the server reports a metadata conflict and the file is read again with version 1, so every record matches as a duplicate. A moved or archived transcript (a changed `source_path`) is the same session and no longer conflicts. Temporary-chat detection reads the user's own words from these records whatever their stored role.
+
 ### Codex persisted API history
 
 The inspected Codex CLI was `0.158.0`; its own CLI exposes `migrate-rollouts`, and its generated schemas expose paginated history. Agent Hub starts `codex app-server --stdio`, initializes the protocol, calls `thread/read` without resuming, then calls experimental `thread/turns/list` with `itemsView: full` and ascending pagination. Unsupported pagination methods can fall back to the older full-turn `thread/read` response. See [the native app-server documentation](https://developers.openai.com/codex/app-server).

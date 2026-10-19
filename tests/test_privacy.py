@@ -138,8 +138,12 @@ def test_forget_updates_only_dependent_tree_nodes(store, monkeypatch):
     def full_rebuild(*args):
         raise AssertionError('Forgetting a small chat must not rebuild the entire archive')
     monkeypatch.setattr(store, '_rebuild_tree', full_rebuild)
-    store.set_session_privacy('home', first['session_id'], 'forgotten')
-    assert store.zoom('home', node_id('home', 1, 1))['node']['mode'] == 'semantic'
+    receipt = store.set_session_privacy('home', first['session_id'], 'forgotten')
+    # The survivor's summary was written with the forgotten chat as preceding
+    # context, so it is reset too; summaries that could not have seen the chat
+    # are kept (see test_forgetting_resets_later_model_summaries_that_could_have_seen_the_chat).
+    assert receipt['summaries_reset'] == 1
+    assert store.zoom('home', node_id('home', 1, 1))['node']['mode'] != 'semantic'
     assert store.zoom('home', node_id('home', 0, 1))['node']['mode'] != 'semantic'
     with store._read() as con:
         assert not con.execute("SELECT 1 FROM tree_nodes WHERE summary LIKE '%privacyCanary%'").fetchone()
@@ -323,3 +327,28 @@ def test_a_temp_marker_typed_while_claude_is_busy_excludes_the_chat(store):
     # A queued prompt that merely mentions the marker later in its text is not an opt-out.
     other = {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': 'use [temp] next time'}}
     assert capture(store, 'other', client='claude', events=[dict(event_id='x', role='system', text='t', raw=json.dumps(other))])['inserted'] == 1
+
+
+def test_forgetting_resets_later_model_summaries_that_could_have_seen_the_chat(store):
+    def complete_all(label):
+        for _ in range(20):
+            tasks = store.summary_tasks('home', limit=50)
+            if not tasks:
+                return
+            for task in tasks:
+                store.complete_summary('home', task['id'], f'{label} summary of {task["lo"]}..{task["hi"]}', task['source_hash'], 'fake-model')
+    long = lambda word: word + ' ' + 'detail ' * 120
+    capture(store, 'before', events=[event(long('earlier'), identifier=str(i)) for i in range(2)])
+    complete_all('early')                      # written before the secret chat existed
+    gone = capture(store, 'secret', events=[event(long('privacyCanary'), identifier='s')])
+    capture(store, 'after', events=[event(long('later'), identifier=str(i)) for i in range(5)])
+    complete_all('late')                       # later records summarized with the secret in context
+    nodes = {(n['lo'], n['hi']): n for n in store.view('home', max_nodes=64)}
+    assert nodes[(0, 0)]['summary'].startswith('early')
+    receipt = store.set_session_privacy('home', gone['session_id'], 'forgotten')
+    assert receipt['summaries_reset'] > 0
+    after = {(n['lo'], n['hi']): n for n in store.view('home', max_nodes=64)}
+    assert after[(0, 0)]['summary'].startswith('early')          # could not have seen it: kept
+    later = [n for (lo, hi), n in after.items() if lo > 2]
+    assert later and all(n['mode'] != 'semantic' for n in later)  # back to excerpts for re-summarizing
+    assert 'privacyCanary' not in store.context('home', 64000)['text']

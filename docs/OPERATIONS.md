@@ -106,6 +106,18 @@ agent-hub worker --data-dir "$HOME/.local/share/agent-hub" --project atlas --llm
 
 Periodic model work should schedule bounded invocations with a chosen frequency and budget. This delivery does not create a schedule or authorize recurring provider spending. Ordinary startup and ingestion do not call a model.
 
+## Put history in time order
+
+Uploads get positions in arrival order, so a large backfill makes old sessions look like the newest history. Put a project back in source-time order with:
+
+```bash
+agent-hub backup --data-dir "$HOME/.local/share/agent-hub" --output "$HOME/agent-hub-before-reorder.sqlite3"
+agent-hub reorder --data-dir "$HOME/.local/share/agent-hub" --project PROJECT          # report only
+agent-hub reorder --data-dir "$HOME/.local/share/agent-hub" --project PROJECT --apply  # write it
+```
+
+Records sort by their source time, carried forward within each session (a record without a time follows the one before it; a session without times uses its capture time), so a session's own order never changes and overlapping sessions interleave. IDs, raw records, notes and search are unchanged. Positions and `lo+n` references change, gaps left by forgotten chats close, and the tree is rebuilt, which resets model-written summaries (the report shows how many). The command holds the worker's lock, moves its extraction checkpoints to just before the first record each stage had not processed (already-processed records after it are revisited; deduplication prevents repeated notes) and clears blocked tree nodes, which are found again without model calls. Capture can keep running; uploads wait for the reorder's write and then append after it. Run it again after any later backfill.
+
 ## Rebuild and upgrades
 
 ```bash

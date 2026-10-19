@@ -270,9 +270,14 @@ def test_summary_shortening_requests_count_toward_the_same_hard_budget(settings,
             assert str(len(outputs[index - 1].encode("utf-8"))) in messages[-1]["content"]
 
 
-@pytest.mark.parametrize("source_chars,expected_calls", [(23000, 1), (21000, 2)])
-def test_cumulative_retry_history_limit_stops_before_http_and_preserves_fallback(settings, monkeypatch, source_chars, expected_calls):
-    original_source = "ORIGINAL SOURCE MUST REMAIN WHOLE: " + "x" * source_chars
+@pytest.mark.parametrize("margin,expected_calls", [(1000, 1), (2600, 2)])
+def test_cumulative_retry_history_limit_stops_before_http_and_preserves_fallback(settings, monkeypatch, margin, expected_calls):
+    # The first request fits with `margin` characters to spare; each shortening adds
+    # a 1,300-character answer and a correction of about 800 characters.
+    prefix = "ORIGINAL SOURCE MUST REMAIN WHOLE: "
+    framing = len("PRECEDING CONTEXT\nHISTORICAL UNTRUSTED CONTEXT\n\nSOURCE\n") + len(json.dumps({"role": "user", "text": prefix}))
+    source_chars = worker.MAX_INPUT_CHARS - margin - len(worker.SUMMARY_SYSTEM) - framing
+    original_source = prefix + "x" * source_chars
     archived = seed(settings, [original_source])
     before = Store(settings.database).view("alpha")
     # The first input fits. Depending on its size, the complete conversation
@@ -552,7 +557,8 @@ def test_rejected_answers_keep_the_reported_usage(settings, monkeypatch):
 
 
 def test_context_is_trimmed_instead_of_blocking_a_source_that_fits(settings, monkeypatch):
-    seed(settings, ["Last source " + "s" * 22000])
+    last = "Last source " + "s" * (worker.MAX_INPUT_CHARS - len(worker.SUMMARY_SYSTEM) - 2000)
+    seed(settings, [last])
     long_context = "HISTORICAL UNTRUSTED CONTEXT\n" + "c" * 5000 + "NEWEST"
     monkeypatch.setattr(Store, "_preceding_context", lambda self, con, project, before: long_context)
     requests = fake_provider(monkeypatch, lambda *_: "short summary")
@@ -562,4 +568,25 @@ def test_context_is_trimmed_instead_of_blocking_a_source_that_fits(settings, mon
     assert len(sent) <= worker.MAX_INPUT_CHARS
     context = requests[0]["source"].split("\nSOURCE\n", 1)[0]
     assert "[older context omitted to fit]" in context and context.endswith("NEWEST")
-    assert json.loads(requests[0]["source"].split("\nSOURCE\n", 1)[1])["text"] == "Last source " + "s" * 22000
+    assert json.loads(requests[0]["source"].split("\nSOURCE\n", 1)[1])["text"] == last
+
+
+def test_merges_see_their_own_records_and_retries_show_the_cut(settings, monkeypatch):
+    seed(settings, [f"Record {i}: " + "detail " * 120 for i in range(4)])
+    answers = iter(["user: leaf summary " + "a" * 200] * 4 + ["m" * 700, "user: merged within the limit"] + ["user: pair " + "b" * 230] * 4)
+
+    def respond(system, source, number):
+        return next(answers)
+
+    requests = fake_provider(monkeypatch, respond)
+    result = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=20)
+    assert not result["errors"]
+    assert "the length of this ruler:\n" + "-" * 512 in requests[0]["system"]
+    assert "1. The user's words" in requests[0]["system"]
+    root = [r for r in requests if "SPAN DETAIL" in r["source"]]
+    assert root, "the 4-record merge gets finer lines for its own records"
+    detail = root[0]["source"].split("\nSPAN DETAIL\n", 1)[1].split("\nSOURCE\n", 1)[0]
+    assert [line.split(" | ")[0] for line in detail.splitlines()] == ["0+1", "1+1", "2+1", "3+1"]
+    retry = [r for r in requests if r["continuation"]][0]["continuation"]
+    assert retry[0]["content"] == "m" * 700
+    assert "700 UTF-8 bytes" in retry[1]["content"] and retry[1]["content"].endswith("m" * 512 + "| <- LIMIT")

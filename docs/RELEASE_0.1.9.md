@@ -14,4 +14,16 @@ Bug fixes found by comparing Agent Hub with the source of UniiChat (github.com/V
 
 **Backfill order.** Upload jobs ran in hash order, so a backfill entered old sessions in random order. Jobs now run in the order queued, and discovered transcripts are queued oldest first.
 
-**Docs.** The forgetting guide now states that a model summary of a later record may have copied a detail from a forgotten chat via its context, and how to remove that. The spec no longer describes the offline context cache removed in 0.1.6.
+**Put history in time order.** `agent-hub reorder --project P` reports, and `--apply` performs, a renumbering of a project's records by source time (carried forward within each session, so no session's own order changes), closing forgotten-chat gaps and rebuilding the tree. IDs, raw records, notes and search are unchanged; worker checkpoints are translated. Use it once after a backfill.
+
+**Dated, compact context.** The context pack is one line per record: `note <id> | kind | sources | statement`, or `lo+n | dates | text` for a span, history oldest first, so an agent sees when each part happened. Line breaks inside records are flattened, so captured text cannot start a line and pose as a note or instruction. About twice as much history fits. Query matches may use at most half of the remaining budget.
+
+**Zoom by `lo+n`.** `memory_zoom` accepts span references such as `1024+512` (or `37+1` for one record); search hits and context lines carry them, so an agent can move from a hit to the history around it. A malformed reference is refused with the tree's top references.
+
+**Better summaries.** A merge also receives finer lines for its own records (`SPAN DETAIL`), not only its two halves. The prompt, adapted from UniiChat's, ranks what to keep (the user's words first, tool steps last), asks for exact names, ids, paths and errors, and shows a 512-character ruler; a too-long answer is shown exactly where the limit cuts it.
+
+**Capture parser version 2 for new sessions.** Codex's duplicate event copies of messages become placeholders; injected `AGENTS.md`/environment blocks are no longer tagged as the user's words; `apply_patch` inputs, shell commands and search queries become searchable; Claude Code meta and compaction summaries become `system`, subagent prompts `assistant`, queued prompts `user` and command output `tool`. Sessions captured earlier keep version 1, and a lost checkpoint falls back to it automatically, so archived records never conflict. A moved or archived transcript no longer conflicts on its path.
+
+**Stricter forgetting.** Forgetting a chat also resets model-written summaries of later records that were written while it was archived (they may have copied a detail from it through their context); they are summarized again by later worker runs. With the worker never enabled this changes nothing.
+
+**Docs.** The spec no longer describes the offline context cache removed in 0.1.6.

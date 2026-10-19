@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import queue
 import subprocess
 import threading
@@ -97,7 +98,82 @@ def _detect_client(records: list[tuple[int, int, str, Any]]) -> str:
     raise AdapterError("Unrecognized transcript format; specify --client jsonl for an explicit generic import.")
 
 
-def _normalize(item: Any, client: str) -> tuple[str, str, bool]:
+# Version 2 (0.1.9) corrects roles and searchable text for NEW sessions. A session
+# keeps the version it was first captured with, so replaying an archived session
+# reproduces its archived text exactly (version 1 below is unchanged).
+ADAPTER_VERSION = 2
+_INJECTED = re.compile(r"^\s*(<[a-z_][a-z0-9_-]*[ >]|# AGENTS\.md)", re.I)
+_COMMAND_OUTPUT = re.compile(r"^\s*<(local-command-stdout|local-command-stderr|bash-stdout|bash-stderr)>")
+
+
+def _texts(content: Any) -> list[str]:
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [text for part in content for text in _texts(part)]
+    if isinstance(content, dict):
+        for key in ("text", "content"):
+            if key in content:
+                return _texts(content[key])
+    return []
+
+
+def _codex_call_text(payload: dict[str, Any]) -> str:
+    """A Codex tool call with the fields that say what it did (patch, command, query)."""
+    name = payload.get("name", payload.get("type", "tool"))
+    lines = [f"Tool call: {name}"]
+    action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    for value in (payload.get("arguments"), payload.get("input"), action.get("command"), action.get("query"), action.get("url")):
+        if value is None:
+            continue
+        lines.append(" ".join(map(str, value)) if isinstance(value, list) else value if isinstance(value, str)
+                     else json.dumps(value, ensure_ascii=False, sort_keys=True))
+    return "\n".join(lines)
+
+
+def _normalize_v2(item: dict[str, Any], client: str) -> tuple[str, str, bool] | None:
+    """Version 2 rules; None falls through to the shared rules."""
+    kind = str(item.get("type", "unknown"))
+    if client == "codex":
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        ptype = payload.get("type")
+        if kind == "response_item" and ptype == "message" and payload.get("role") == "user":
+            texts = _texts(payload.get("content"))
+            injected = bool(texts) and all(_INJECTED.match(text) for text in texts)
+            # Injected AGENTS.md/environment blocks are client context, not the user's words.
+            return ("system" if injected else "user"), content_text(payload.get("content")), True
+        if kind == "response_item" and ptype in {"function_call", "custom_tool_call", "local_shell_call", "web_search_call"}:
+            return "assistant", _codex_call_text(payload), True
+        if kind == "event_msg" and ptype in {"user_message", "agent_message", "agent_reasoning"}:
+            # Codex records each message twice; the response item carries the text.
+            return "system", f"Codex event: {ptype} (also recorded as a response item)", True
+        return None
+    if client == "claude":
+        if kind == "attachment":
+            attachment = item.get("attachment")
+            if isinstance(attachment, dict) and attachment.get("type") == "queued_command" and isinstance(attachment.get("prompt"), str):
+                # Typed while Claude was busy: the user's own message.
+                return "user", attachment["prompt"], True
+            return None
+        if kind in {"user", "assistant"}:
+            role, text, known = _normalize(item, client, 1)
+            if item.get("isMeta") or item.get("isCompactSummary"):
+                return "system", text, known  # client-written meta and compaction summaries
+            if role == "user" and item.get("isSidechain"):
+                return "assistant", text, known  # a subagent's prompt, written by its parent agent
+            if role == "user" and _COMMAND_OUTPUT.match(text):
+                return "tool", text, known
+            return role, text, known
+    return None
+
+
+def _normalize(item: Any, client: str, adapter_version: int = 1) -> tuple[str, str, bool]:
+    if adapter_version >= 2 and isinstance(item, dict):
+        corrected = _normalize_v2(item, client)
+        if corrected is not None:
+            return corrected
     if not isinstance(item, dict):
         return "system", "Unsupported JSON value retained in raw source.", False
     kind = str(item.get("type", "unknown"))
@@ -161,6 +237,7 @@ def parse_jsonl(
     cwd: str | None = None,
     final: bool = False,
     start_line: int = 0,
+    adapter_version: int = ADAPTER_VERSION,
 ) -> Transcript:
     """Parse complete records, preserving raw JSON text exactly.
 
@@ -243,7 +320,8 @@ def parse_jsonl(
         pending_bytes=pending,
         complete_bytes=offset,
         complete_lines=complete_lines,
-        metadata={"adapter_version": 1, "format": f"{client}_jsonl", "source_path": path},
+        metadata={"adapter_version": adapter_version if client in {"codex", "claude"} else 1,
+                  "format": f"{client}_jsonl", "source_path": path},
     )
     if parent_session:
         result.metadata["parent_session_id"] = parent_session
@@ -269,7 +347,7 @@ def parse_jsonl(
         for directory in directories:
             if isinstance(directory, str) and directory and directory not in result.observed_cwds:
                 result.observed_cwds.append(directory)
-        role, text, known = _normalize(item, client)
+        role, text, known = _normalize(item, client, adapter_version)
         if not known:
             unknown.add(str(item.get("type", "unknown")) if isinstance(item, dict) else "non_object")
         event = {

@@ -8,7 +8,9 @@ UniiChat source (github.com/VictorTaelin/UniiChat, commit 0500bf6) was read as d
 - A queued `[temp]` Claude prompt did not exclude the chat (`tests/test_privacy.py`).
 - Upload jobs and discovered files did not run oldest first (`tests/test_clients.py`).
 
-Linux, CPython 3.13.16: `PYTHONPATH=src python -m pytest -q` ran 326 tests, 325 passed. The one failure, `test_client_against_real_authenticated_service_contract`, is the environment-specific httpx mock-transport failure also recorded in the two entries below. `scripts/browser-smoke.cjs` passed its 27 checks against the synthetic fixture. The deployed home VM was not exercised.
+New in the same release, each with synthetic tests: time reorder (backfilled session moved first, per-session order kept with missing and backwards timestamps, IDs/notes/search unchanged, forgotten gaps closed, worker checkpoints translated, refused while a worker run holds the lock); dated one-line context (oldest first, hostile multi-line text confined to its own line, query matches capped at half the budget); `lo+n` zoom through the store and REST route; merges receiving their own records as span detail and retries showing the 512-byte cut; parser version 2 roles and payloads for Codex and Claude Code with version 1 output unchanged, version kept per file, and a lost checkpoint falling back to version 1 with all records matching as duplicates; and forgetting resetting only model summaries that could have seen the chat.
+
+Linux, CPython 3.13.16: `PYTHONPATH=src python -m pytest -q` ran 340 tests, 339 passed. The one failure, `test_client_against_real_authenticated_service_contract`, is the environment-specific httpx mock-transport failure also recorded in the two entries below. `scripts/browser-smoke.cjs` passed its 27 checks against the synthetic fixture. The deployed home VM was not exercised.
 
 ---
 

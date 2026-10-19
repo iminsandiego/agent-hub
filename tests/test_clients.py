@@ -585,3 +585,85 @@ def test_discovered_transcripts_queue_oldest_first(cfg, tmp_path):
     discover_paths(cfg, state)
     queued = [Path(json.loads(job["payload"])["path"]).name for job in state.due_jobs()]
     assert queued == ["zeta.jsonl", "alpha.jsonl", "mid.jsonl"]
+
+
+CODEX_V2_RECORDS = [
+    {"timestamp": "2026-10-07T12:00:00Z", "type": "session_meta", "payload": {"id": "native-v2", "cwd": "/w"}},
+    {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /w\n\nDo the thing."}]}},
+    {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>cwd /w</environment_context>"}]}},
+    {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Never push to main"}]}},
+    {"type": "event_msg", "payload": {"type": "user_message", "message": "Never push to main"}},
+    {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Understood."}]}},
+    {"type": "event_msg", "payload": {"type": "agent_message", "message": "Understood."}},
+    {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch\n*** Update File: a.py\n+x = 1\n*** End Patch"}},
+    {"type": "response_item", "payload": {"type": "local_shell_call", "action": {"type": "exec", "command": ["pytest", "-q"]}}},
+]
+
+
+def test_codex_parser_v2_roles_dedup_and_tool_payloads():
+    data = jsonl(*CODEX_V2_RECORDS)
+    v2 = [(e["role"], e["text"]) for e in parse_jsonl(data, machine="m", path="/w/r.jsonl").events]
+    assert v2[1][0] == v2[2][0] == "system"                       # injected context is not the user's words
+    assert v2[3] == ("user", "Never push to main")
+    assert v2[4] == ("system", "Codex event: user_message (also recorded as a response item)")
+    assert v2[6] == ("system", "Codex event: agent_message (also recorded as a response item)")
+    assert "*** Update File: a.py" in v2[7][1] and v2[8][1] == "Tool call: local_shell_call\npytest -q"
+    assert sum(text == "Never push to main" for _, text in v2) == 1
+    # Version 1 reproduces the archived normalization exactly.
+    v1 = [(e["role"], e["text"]) for e in parse_jsonl(data, machine="m", path="/w/r.jsonl", adapter_version=1).events]
+    assert v1[1][0] == "user" and v1[4] == ("user", "Never push to main") and v1[6] == ("assistant", "Understood.")
+    assert "Update File" not in v1[7][1]
+
+
+def test_claude_parser_v2_roles():
+    records = [
+        {"type": "user", "sessionId": "c2", "cwd": "/w", "message": {"role": "user", "content": "Real question"}},
+        {"type": "user", "sessionId": "c2", "isMeta": True, "message": {"role": "user", "content": "Caveat: generated while running local commands"}},
+        {"type": "user", "sessionId": "c2", "isCompactSummary": True, "message": {"role": "user", "content": "This session is being continued. Note: never do X"}},
+        {"type": "user", "sessionId": "c2", "message": {"role": "user", "content": "<local-command-stdout>ok</local-command-stdout>"}},
+        {"type": "attachment", "sessionId": "c2", "attachment": {"type": "queued_command", "prompt": "Also update the docs"}},
+        {"type": "assistant", "sessionId": "c2", "message": {"role": "assistant", "content": [{"type": "text", "text": "Done"}]}},
+    ]
+    events = parse_jsonl(jsonl(*records), machine="m", path="/w/c2.jsonl").events
+    assert [e["role"] for e in events] == ["user", "system", "system", "tool", "user", "assistant"]
+    assert events[4]["text"] == "Also update the docs"
+    legacy = parse_jsonl(jsonl(*records), machine="m", path="/w/c2.jsonl", adapter_version=1).events
+    assert [e["role"] for e in legacy] == ["user", "user", "user", "user", "system", "assistant"]
+    sidechain = {"type": "user", "sessionId": "c2", "isSidechain": True, "message": {"role": "user", "content": "Search the repo for X"}}
+    child = parse_jsonl(jsonl(sidechain), machine="m", path="/w/c2/subagents/agent-1.jsonl").events
+    assert child[0]["role"] == "assistant"  # the parent agent's prompt to its subagent
+
+
+def test_new_files_use_v2_old_checkpoints_stay_v1_and_lost_checkpoints_fall_back(cfg, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    service = RecordingService()
+    client = connection(cfg, service)
+    fresh = work / "fresh.jsonl"
+    fresh.write_bytes(jsonl(*codex_records(work)))
+    ingest_file(cfg, fresh, memory=client)
+    assert service.payloads[-1]["metadata"]["adapter_version"] == 2
+    # A session archived by 0.1.8 (version 1) whose local checkpoint was lost.
+    old = work / "old.jsonl"
+    old.write_bytes(jsonl({"type": "session_meta", "payload": {"id": "native-old", "cwd": str(work)}},
+                          {"type": "event_msg", "payload": {"type": "user_message", "message": "Old words"}}))
+    from agent_hub.client import _ingest_file_version, file_key
+    _ingest_file_version(cfg, old.resolve(), 1, client="auto", project=None, cwd=None, session_id=None, final=False,
+                         memory=client, state=LocalState(cfg))
+    archived = dict(service.events)
+    cfg.state_dir = str(tmp_path / "fresh-state")  # checkpoint lost
+    receipt = ingest_file(cfg, old, memory=client)
+    assert receipt["inserted"] == 0 and receipt["duplicates"] == 2 and service.events == archived
+    assert LocalState(cfg).checkpoint(file_key(cfg, old.resolve(), "auto"))["adapter_version"] == 1
+    # Growth of that file continues with version 1.
+    with old.open("ab") as stream:
+        stream.write(jsonl({"type": "event_msg", "payload": {"type": "user_message", "message": "More words"}}))
+    ingest_file(cfg, old, memory=client)
+    assert service.payloads[-1]["events"][-1]["role"] == "user"  # version 1 keeps the event copy as user
+
+
+def test_checkpoints_from_before_versioning_count_as_version_1(cfg, tmp_path):
+    state = LocalState(cfg)
+    with state.connect() as db:
+        db.execute("INSERT INTO files(id,offset,prefix_sha,session_id,project,mtime_ns,size) VALUES('legacy',0,'x','s','atlas',0,0)")
+    assert state.checkpoint("legacy")["adapter_version"] == 1

@@ -820,7 +820,8 @@ async function privacyMenu(session) {
   if (!ok) return;
   const result = await api(base() + "/sessions/" + enc(session.id) + "/privacy", { method: "POST", body: { mode } });
   state.sessions.delete(session.id);
-  toast("Chat " + (result.mode === "temporary" ? "made temporary" : "forgotten") + ". Watchers won’t save it again.");
+  toast("Chat " + (result.mode === "temporary" ? "made temporary" : "forgotten") + ". Watchers won’t save it again." +
+    (result.summaries_reset ? " " + plural(result.summaries_reset, "later summary", "later summaries") + " will be rewritten without it." : ""));
   refreshCounts();
   go("sessions");
 }
@@ -874,24 +875,47 @@ async function contextView(root, routeInfo) {
   meter.style.width = Math.min(100, (pack.char_count / budget) * 100).toFixed(1) + "%";
   root.append(form, el("div", "meter-row", el("div", { class: "meter", role: "img", "aria-label": num(pack.char_count) + " of " + num(budget) + " characters" }, meter),
     el("span", null, num(pack.char_count) + " of " + num(budget) + " characters"), pack.truncated ? chip("Trimmed to fit", "status status-candidate") : null));
-  const groups = { active_reviewed_note: [], matching_historical_event: [], historical_tree_excerpt: [] };
+  // The pack is one record per line: "note id | kind | sources | statement" or
+  // "lo+n | dates | text", grouped under "## " headings (store.py context()).
+  const groups = { notes: [], matches: [], history: [] };
   const notices = [];
+  let current = null;
   for (const line of pack.text.split("\n")) {
-    if (!line.startsWith("{")) { if (/truncated/i.test(line)) notices.push(line); continue; }
-    try { const record = JSON.parse(line); (groups[record.record] || (groups[record.record] = [])).push(record); } catch (_) { /* Header text. */ }
+    if (line.startsWith("## ")) { current = /^## Active notes/.test(line) ? "notes" : /^## Records matching/.test(line) ? "matches" : /^## History/.test(line) ? "history" : null; continue; }
+    const note = /^note (\S+) \| ([^|]*) \| ([^|]*) \| (.*)$/.exec(line);
+    if (note && current === "notes") { groups.notes.push({ id: note[1], kind: note[2], sources: note[3], statement: note[4] }); continue; }
+    const span = /^(\d+)\+(\d+) \| ([^|]*) \| (.*)$/.exec(line);
+    if (span && current && current !== "notes") {
+      const [, lo, n, when, body] = span;
+      const mode = /^summary: /.test(body) ? "semantic" : /^excerpt: /.test(body) ? "extractive" : "verbatim";
+      groups[current].push({ ref: lo + "+" + n, lo: Number(lo), hi: Number(lo) + Number(n) - 1, when, mode, text: body.replace(/^(summary|excerpt): /, "") });
+      continue;
+    }
+    if (/truncated/i.test(line)) notices.push(line);
   }
+  const lines = (text, query, limit = 3) => {
+    const parts = text.split(" ¶ ");
+    const list = el("div", "summary");
+    for (const part of parts.slice(0, limit)) {
+      const tagged = /^(user|assistant|tool|system|developer|human): ([\s\S]*)$/.exec(part);
+      list.append(el("div", "summary-line", tagged ? roleChip(tagged[1]) : null, el("span", null, query ? highlight(tagged ? tagged[2] : part, query) : (tagged ? tagged[2] : part))));
+    }
+    if (parts.length > limit) list.append(el("div", "summary-more", "+ " + plural(parts.length - limit, "more record")));
+    return list;
+  };
   const section = (title, sub, items, render, emptyText) => panel(title + " · " + num(items.length), { sub, body: el("div", "panel-body stack", items.length ? items.map(render) : el("p", "faint", emptyText)) });
-  root.append(section("Active notes", "Reviewed notes, newest first" + (query ? ", with ones matching the task first" : "") + ".", groups.active_reviewed_note,
+  root.append(section("Active notes", "Reviewed notes, newest first" + (query ? ", with ones matching the task first" : "") + ".", groups.notes,
     (record) => el("button", { class: "context-item", type: "button", onclick: () => inspect({ type: "memory", id: record.id }) }, kindChip(record.kind), el("span", null, record.statement)),
     "No active notes in this project."));
   if (query) {
-    root.append(section("Records matching the task", "Search hits for “" + query + "”.", groups.matching_historical_event,
-      (record) => el("button", { class: "context-item", type: "button", onclick: () => inspect({ type: "event", id: record.id }) }, roleChip(record.role), el("span", null, highlight(record.excerpt, query))),
+    root.append(section("Records matching the task", "Search hits for “" + query + "”.", groups.matches,
+      (record) => el("button", { class: "context-item column", type: "button", onclick: () => inspect({ type: "node", id: record.ref }) },
+        el("span", "context-range", el("span", "faint", rangeLabel(record) + " · " + record.when)), lines(record.text, query, 1)),
       "No matching records were included."));
   }
-  root.append(section("Recent history", "Newest spans of the timeline, coarser further back.", groups.historical_tree_excerpt,
-    (record) => el("button", { class: "context-item column", type: "button", onclick: () => inspect({ type: "node", id: record.id }) },
-      el("span", "context-range", chip(modeLabel(record.mode), "mode mode-" + record.mode), el("span", "faint", rangeLabel(record))), summaryBlock(record.summary, 3)),
+  root.append(section("History", "All history, newest first here (agents read it oldest first). Recent spans in more detail; dates are UTC.", [...groups.history].reverse(),
+    (record) => el("button", { class: "context-item column", type: "button", onclick: () => inspect({ type: "node", id: record.ref }) },
+      el("span", "context-range", chip(modeLabel(record.mode), "mode mode-" + record.mode), el("span", "faint", rangeLabel(record) + " · " + record.when)), lines(record.text)),
     "No history yet."));
   if (notices.length) root.append(el("p", "callout", notices.join(" ")));
   root.append(el("details", "exact", el("summary", null, "Exact text sent to the agent"), el("div", "exact-actions", copyButton(pack.text, "Copy text")), el("pre", "source", pack.text)));
