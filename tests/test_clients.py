@@ -824,3 +824,35 @@ def test_hooks_reach_a_plain_http_loopback_server_without_httpx(cfg, tmp_path):
     assert prompt_context(cfg, {"session_id": "loop-2", "cwd": str(tmp_path / "work"), "prompt": "garden hose"}) == {}
     cfg.url = "https://memory.example.com"
     assert not isinstance(hook_client(cfg, timeout=2), LoopbackClient)
+
+
+def test_a_harness_notification_is_not_treated_as_the_first_prompt(cfg, tmp_path):
+    seen = []
+    online = MemoryClient(cfg, transport=httpx.MockTransport(
+        lambda request: seen.append(1) or httpx.Response(200, json={"text": "HISTORICAL UNTRUSTED DATA\n1+1 | x | chat: c | user: y", "event_ids": ["e"]})))
+    base = {"session_id": "native-n", "cwd": str(tmp_path / "work")}
+    notice = "<system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification><task-id>b1</task-id></task-notification>"
+    assert prompt_context(cfg, {**base, "prompt": notice}, memory=online) == {} and seen == []
+    assert prompt_context(cfg, {**base, "prompt": "Where is the garden hose?"}, memory=online)
+
+
+def test_setup_keeps_codex_tool_approvals_and_other_settings(cfg, tmp_path):
+    codex_home = tmp_path / "codex"; claude_home = tmp_path / "claude"
+    codex_home.mkdir(); claude_home.mkdir()
+    config_path = cfg.save(tmp_path / "client.json")
+    kwargs = dict(codex_home=codex_home, claude_home=claude_home, claude_mcp_file=tmp_path / "claude.json", executable=sys.executable)
+    setup_clients(cfg, config_path, **kwargs)
+    codex_file = codex_home / "config.toml"
+    text = codex_file.read_text() + '\n[mcp_servers.agent-hub.tools.memory_search]\napproval_mode = "auto"\n'
+    codex_file.write_text(text)
+    claude = json.loads((tmp_path / "claude.json").read_text())
+    claude["mcpServers"]["agent-hub"]["env"] = {"EXTRA": "1"}
+    (tmp_path / "claude.json").write_text(json.dumps(claude))
+    setup_clients(cfg, config_path, **kwargs)  # no conflict raised
+    codex = tomlkit.parse(codex_file.read_text())
+    assert codex["mcp_servers"]["agent-hub"]["tools"]["memory_search"]["approval_mode"] == "auto"
+    assert json.loads((tmp_path / "claude.json").read_text())["mcpServers"]["agent-hub"]["env"] == {"EXTRA": "1"}
+    # A changed launch command is still a conflict.
+    codex_file.write_text(codex_file.read_text().replace('command = "', 'command = "/other/'))
+    with pytest.raises(ClientError, match="manually changed"):
+        setup_clients(cfg, config_path, **kwargs)

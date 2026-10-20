@@ -492,6 +492,13 @@ def test_a_ruler_copy_or_control_tag_is_not_stored_as_a_summary(settings, monkey
     assert Store(settings.database).view("alpha", max_nodes=1)[0]["mode"] == "extractive"
 
 
+def test_a_summary_may_quote_a_control_tag_it_summarizes():
+    assert worker._unusable("<budget:token_budget>512</budget:token_budget>")
+    quoting = ("user: asked why the junk check rejects answers; assistant: Haiku returned <budget:token_budget>512</budget:token_budget> "
+               "as a summary twice; the worker now rejects ruler copies and lone control tags.")
+    assert worker._unusable(quoting) is None
+
+
 def test_an_oversized_record_no_longer_holds_back_the_whole_tree(settings, monkeypatch):
     seed(settings, ["Huge tool output " + "x" * worker.MAX_INPUT_CHARS] + [f"Event {i} " + "detail " * 120 for i in range(1, 8)])
     fake_provider(monkeypatch, lambda *_: "short semantic summary")

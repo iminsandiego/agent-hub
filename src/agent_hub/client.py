@@ -715,6 +715,12 @@ def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars:
     return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": bounded_context(text, budget_chars)}}
 
 
+def _harness_notice(prompt: str) -> bool:
+    """A turn the harness submits for itself (a background task finished, a reminder)."""
+    head = prompt.lstrip()[:400]
+    return head.startswith(("<system-reminder>", "<task-notification>")) or "[SYSTEM NOTIFICATION" in head
+
+
 def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars: int = HOOK_CONTEXT_CHARS,
                    memory: MemoryClient | None = None) -> dict[str, Any]:
     """Records matching a chat's first prompt, grouped by chat (UserPromptSubmit).
@@ -727,6 +733,8 @@ def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_char
     session = payload.get("session_id")
     if not isinstance(prompt, str) or not prompt.strip() or not isinstance(session, str) or not session:
         return {}
+    if _harness_notice(prompt):
+        return {}  # not the user's words; the user's first real prompt still gets matches
     state = LocalState(config)
     if state.prompted(session):
         return {}
