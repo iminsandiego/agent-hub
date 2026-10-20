@@ -780,3 +780,47 @@ def test_checkpoints_from_before_versioning_count_as_version_1(cfg, tmp_path):
     with state.connect() as db:
         db.execute("INSERT INTO files(id,offset,prefix_sha,session_id,project,mtime_ns,size) VALUES('legacy',0,'x','s','atlas',0,0)")
     assert state.checkpoint("legacy")["adapter_version"] == 1
+
+
+def test_hooks_reach_a_plain_http_loopback_server_without_httpx(cfg, tmp_path):
+    from agent_hub.client import LoopbackClient, hook_client
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            if "harbor" in self.path:
+                body, status = json.dumps({"detail": "not authorized"}).encode(), 403
+            else:
+                body, status = json.dumps({"text": "HISTORICAL UNTRUSTED DATA\n3+1 | x | chat: c | user: hose", "event_ids": ["e"]}).encode(), 200
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        cfg.url = f"http://127.0.0.1:{server.server_address[1]}/hub"
+        client = hook_client(cfg, timeout=2)
+        assert isinstance(client, LoopbackClient)
+        result = client.context("atlas", budget_chars=9500, query="garden hose", sections=["matches"])
+        path, auth = seen[-1]
+        assert path.startswith("/hub/v1/projects/atlas/context?") and "sections=matches" in path and auth == "Bearer synthetic-test-token"
+        assert result["event_ids"] == ["e"]
+        hook = prompt_context(cfg, {"session_id": "loop-1", "cwd": str(tmp_path / "work"), "prompt": "garden hose"})
+        assert "3+1" in hook["hookSpecificOutput"]["additionalContext"]
+        with pytest.raises(ServiceError) as denied:
+            LoopbackClient(cfg, timeout=2).request("GET", "v1/projects/harbor/context")
+        assert denied.value.status == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+    # Nothing listens now: the hook adds nothing rather than failing the prompt.
+    assert prompt_context(cfg, {"session_id": "loop-2", "cwd": str(tmp_path / "work"), "prompt": "garden hose"}) == {}
+    cfg.url = "https://memory.example.com"
+    assert not isinstance(hook_client(cfg, timeout=2), LoopbackClient)

@@ -33,6 +33,80 @@ class ServiceError(ClientError):
         super().__init__(f"Memory service returned HTTP {status}." + (f" {detail[:300]}" if detail else ""))
 
 
+class LoopbackClient:
+    """The few GET requests a hook makes, for a plain-HTTP loopback server.
+
+    Importing and configuring httpx costs a hook process about 60 ms; a hook to
+    ``http://127.0.0.1:...`` (an SSH tunnel or a local server) needs none of its
+    features. Same authentication, status handling and timeout as MemoryClient;
+    no redirects or proxies are followed (MemoryClient follows none either).
+    """
+
+    def __init__(self, config: "ClientConfig", *, timeout: float):
+        self.config = config
+        self.timeout = timeout
+
+    @staticmethod
+    def usable(config: "ClientConfig") -> bool:
+        parts = urlsplit(config.url)
+        host = (parts.hostname or "").lower()
+        try:
+            loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        return parts.scheme == "http" and loopback
+
+    def close(self) -> None:
+        pass
+
+    def request(self, method: str, path: str, *, auth: bool = True, params: dict[str, Any] | None = None) -> Any:
+        import http.client
+        from urllib.parse import urlencode
+        if method != "GET":
+            raise ValueError("LoopbackClient only performs GET requests")
+        parts = urlsplit(self.config.url)
+        target = parts.path.rstrip("/") + "/" + path.lstrip("/") + ("?" + urlencode(params) if params else "")
+        headers = {"Authorization": "Bearer " + self.config.token()} if auth else {}
+        connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=self.timeout)
+        try:
+            connection.request("GET", target, headers=headers)
+            response = connection.getresponse()
+            body = response.read()
+        finally:
+            connection.close()
+        if not 200 <= response.status < 300:
+            detail = ""
+            try:
+                value = json.loads(body)
+                value = value.get("detail", value.get("error", "")) if isinstance(value, dict) else ""
+                detail = value if isinstance(value, str) else ""
+            except ValueError:
+                pass
+            raise ServiceError(response.status, detail)
+        return json.loads(body)
+
+    def project_path(self, project: str, suffix: str) -> str:
+        self.config.check_project(project)
+        return f"v1/projects/{quote(project, safe='')}/{suffix}"
+
+    def context(self, project: str, budget_chars: int = 8000, query: str | None = None,
+                sections: list[str] | None = None) -> dict[str, Any]:
+        return MemoryClient.context(self, project, budget_chars, query, sections)  # same parameters and path
+
+
+def _unreachable(exc: Exception) -> bool:
+    """Whether a hook's request failed because the service could not be reached."""
+    import http.client
+    if isinstance(exc, http.client.HTTPException):
+        return True
+    import httpx  # only after an error; a healthy loopback hook never imports it
+    return isinstance(exc, httpx.TransportError)
+
+
+def hook_client(config: "ClientConfig", *, timeout: float) -> Any:
+    return LoopbackClient(config, timeout=timeout) if LoopbackClient.usable(config) else MemoryClient(config, timeout=timeout)
+
+
 def validate_project(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value):
         raise ClientError("Project IDs start with a lowercase letter and use at most 64 lowercase letters, digits, underscores, or hyphens.")
@@ -617,7 +691,7 @@ def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars:
     project = config.resolve_project(payload.get("cwd"))
     key = state.cache_key(config, project)
     owned = memory is None
-    connection = memory or MemoryClient(config, timeout=0.6)
+    connection = memory or hook_client(config, timeout=0.6)
     try:
         try:
             result = connection.context(project, budget_chars=budget_chars)
@@ -630,9 +704,7 @@ def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars:
         except (OSError, TimeoutError) as exc:
             text = cached_context(state, key)
         except Exception as exc:
-            # httpx is imported lazily to keep SessionEnd enqueue startup small.
-            import httpx
-            if not isinstance(exc, httpx.TransportError):
+            if not _unreachable(exc):
                 raise
             text = cached_context(state, key)
     finally:
@@ -660,7 +732,7 @@ def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_char
         return {}
     project = config.resolve_project(payload.get("cwd"))
     owned = memory is None
-    connection = memory or MemoryClient(config, timeout=1.5)
+    connection = memory or hook_client(config, timeout=1.5)
     try:
         try:
             result = connection.context(project, budget_chars=budget_chars, query=prompt.strip()[:1000], sections=["matches"])
@@ -671,8 +743,7 @@ def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_char
         except (OSError, TimeoutError):
             return {}
         except Exception as exc:
-            import httpx
-            if not isinstance(exc, httpx.TransportError):
+            if not _unreachable(exc):
                 raise
             return {}
     finally:

@@ -335,12 +335,21 @@ def _match_excerpt(text: str, terms: list[str], maximum: int = 1000) -> str:
     if not hits:
         return _excerpt(text, maximum)
     width = maximum - 2
-    best, best_start = -1, 0
-    for index, (position, _) in enumerate(hits):
+    # A window starts a quarter-width before a hit and counts the distinct terms of
+    # that hit and the later ones inside it; a sliding window keeps this linear in
+    # the number of occurrences (a long log can repeat a term thousands of times).
+    best, best_start, right = -1, 0, 0
+    inside: dict[str, int] = {}
+    for index, (position, term) in enumerate(hits):
         start = max(0, position - width // 4)
-        covered = {term for at, term in hits[index:] if at < start + width}
-        if len(covered) > best:
-            best, best_start = len(covered), start
+        while right < len(hits) and hits[right][0] < start + width:
+            inside[hits[right][1]] = inside.get(hits[right][1], 0) + 1
+            right += 1
+        if len(inside) > best:
+            best, best_start = len(inside), start
+        inside[term] -= 1
+        if not inside[term]:
+            del inside[term]
     start = max(0, min(best_start, len(text) - width))
     end = min(len(text), start + width)
     return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
@@ -819,7 +828,7 @@ class Store:
         kept = [word for word in words if word.lower() not in _STOPWORDS and (len(word) > 1 or not word.isascii())]
         return (kept or words)[:32]
 
-    def _search(self, con: sqlite3.Connection, project: str, query: str, limit: int) -> list[dict[str, Any]]:
+    def _search(self, con: sqlite3.Connection, project: str, query: str, limit: int, *, excerpts: bool = True) -> list[dict[str, Any]]:
         """Ranked matches: bookkeeping is not searched; injected and derived records
         (classify.py) follow the conversation's own records."""
         terms = self._terms(query)
@@ -844,10 +853,17 @@ class Store:
             fetch = max(1000, limit * 20)
 
             def candidates(scoped: bool, offset: int) -> list[sqlite3.Row]:
+                if scoped:
+                    return con.execute(
+                        "SELECT h.item_type,h.item_id,bm25(history_fts) AS rank FROM history_fts h "
+                        "WHERE history_fts MATCH ? AND h.project=? ORDER BY rank,h.rowid LIMIT ? OFFSET ?",
+                        (expression, project, fetch, offset)).fetchall()
+                # Rank row ids alone, then read the stored columns of just this page.
                 return con.execute(
-                    "SELECT h.item_type,h.item_id,bm25(history_fts) AS rank FROM history_fts h "
-                    "WHERE history_fts MATCH ?" + (" AND h.project=?" if scoped else "") + " ORDER BY rank,h.rowid LIMIT ? OFFSET ?",
-                    (expression, project, fetch, offset) if scoped else (expression, fetch, offset)).fetchall()
+                    "WITH ranked AS MATERIALIZED (SELECT rowid AS r,bm25(history_fts) AS rank FROM history_fts "
+                    "WHERE history_fts MATCH ? ORDER BY rank,rowid LIMIT ? OFFSET ?) "
+                    "SELECT h.item_type,h.item_id,ranked.rank AS rank FROM ranked JOIN history_fts h ON h.rowid=ranked.r "
+                    "ORDER BY ranked.rank,ranked.r", (expression, fetch, offset)).fetchall()
 
             def keep(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
                 # One lookup per page, not per candidate (a page is up to 1,000 rows).
@@ -931,7 +947,8 @@ class Store:
                 event = con.execute("SELECT id,role,sequence,session_id,source_timestamp FROM events WHERE project=? AND id=?",
                                     (project, match["item_id"])).fetchone()
                 base.update({
-                    "excerpt": _match_excerpt(text_of(event["id"]), terms), "event_id": event["id"], "role": event["role"],
+                    "excerpt": _match_excerpt(text_of(event["id"]), terms) if excerpts else None,
+                    "event_id": event["id"], "role": event["role"],
                     "sequence": event["sequence"], "session_id": event["session_id"], "ref": f"{event['sequence']}+1",
                     "timestamp": event["source_timestamp"], "source_event_ids": [event["id"]],
                     "evidence": [{"event_id": event["id"], "session_id": event["session_id"], "sequence": event["sequence"]}],
@@ -1471,7 +1488,8 @@ class Store:
             )] if "notes" in wanted else []
             all_active = con.execute("SELECT count(*) FROM memories WHERE project=? AND status='active'", (project,)).fetchone()[0] if "notes" in wanted else 0
             # About twenty match lines fit a hook's 9,500 characters; forty leave room for grouping by chat.
-            search_hits = self._search(con, project, query, 40 if budget_chars <= 20000 else 120) if query and ("matches" in wanted or "notes" in wanted) else []
+            search_hits = self._search(con, project, query, 40 if budget_chars <= 20000 else 120, excerpts=False) \
+                if query and ("matches" in wanted or "notes" in wanted) else []
             preferred = [hit["id"] for hit in search_hits if hit["type"] == "memory" and hit["status"] == "active"]
             ordered_ids = list(dict.fromkeys([*preferred, *ids])) if "notes" in wanted else []
             header = CONTEXT_HEADER
@@ -1593,8 +1611,11 @@ class Store:
                 continue
             per_chat[hit["session_id"]] = per_chat.get(hit["session_id"], 0) + 1
             label = _excerpt(self._chat_label(con, project, hit["session_id"], labels), 90)
+            text = hit["excerpt"]
+            if text is None:  # the search left excerpts to the lines that are kept
+                text = _match_excerpt(con.execute("SELECT substr(text,1,200000) FROM events WHERE id=?", (hit["id"],)).fetchone()[0], terms)
             rows.append((hit["id"], f"{hit['sequence']}+1 | {_when(hit['timestamp'], hit['timestamp'])} | chat: {label} | "
-                                    f"{hit['role']}: {_flat(_match_excerpt(hit['excerpt'], terms, 480))}\n"))
+                                    f"{hit['role']}: {_flat(_match_excerpt(text, terms, 480))}\n"))
         return rows
 
     def _node_line(self, con: sqlite3.Connection, project: str, node: dict[str, Any]) -> str:

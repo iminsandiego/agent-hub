@@ -526,3 +526,35 @@ def test_queries_drop_common_words_and_excerpts_show_the_match(store):
     assert "sprinkler valve" in hit["excerpt"] and hit["excerpt"].startswith("…")
     assert store._terms("what is it") == ["what", "is", "it"]  # only common words: keep them
     assert store._terms("where is the sprinkler valve") == ["sprinkler", "valve"]
+
+
+def test_the_excerpt_window_matches_the_original_choice():
+    import random
+    from agent_hub.store import _match_excerpt
+
+    def reference(text, terms, maximum=1000):
+        # The pre-optimization choice: for each hit, count distinct terms from it onward in its window.
+        if len(text) <= maximum:
+            return text
+        lowered = text.lower()
+        hits = sorted((m.start(), t) for t in {x.lower() for x in terms} for m in re.finditer(re.escape(t), lowered))
+        if not hits:
+            return text[: maximum - 1] + "…"
+        width = maximum - 2
+        best, best_start = -1, 0
+        for index, (position, _) in enumerate(hits):
+            start = max(0, position - width // 4)
+            covered = {t for at, t in hits[index:] if at < start + width}
+            if len(covered) > best:
+                best, best_start = len(covered), start
+        start = max(0, min(best_start, len(text) - width))
+        end = min(len(text), start + width)
+        return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+    rng = random.Random(7)
+    words = ["valve", "garden", "hose", "key", "filler", "x", "the"]
+    for _ in range(300):
+        text = " ".join(rng.choice(words) for _ in range(rng.randint(50, 900)))
+        terms = rng.sample(["valve", "garden", "hose", "key", "absent"], rng.randint(1, 4))
+        size = rng.choice([80, 200, 1000])
+        assert _match_excerpt(text, terms, size) == reference(text, terms, size)
