@@ -366,10 +366,21 @@ def parse_jsonl(
     return result
 
 
+class SourceUnavailable(AdapterError):
+    """The native source is gone: a deleted transcript, or a thread Codex no longer holds."""
+
+
 class CodexRpcError(AdapterError):
     def __init__(self, code: int | None):
         self.code = code
         super().__init__(f"Codex app-server request failed (code {code}); check the installed protocol version.")
+
+
+def codex_rpc_error(error: dict[str, Any]) -> AdapterError:
+    # Only the error class is kept; native messages can quote thread content.
+    if "thread not loaded" in str(error.get("message", "")).lower():
+        return SourceUnavailable("Codex holds no saved copy of this thread (thread not loaded).")
+    return CodexRpcError(error.get("code"))
 
 
 class CodexRpc:
@@ -409,7 +420,7 @@ class CodexRpc:
             if message.get("id") != self.counter:
                 continue
             if "error" in message:
-                raise CodexRpcError(message["error"].get("code"))
+                raise codex_rpc_error(message["error"])
             return message.get("result", {})
 
     def _send(self, payload: dict[str, Any]) -> None:

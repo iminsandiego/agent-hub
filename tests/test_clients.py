@@ -14,7 +14,7 @@ import httpx
 import pytest
 import tomlkit
 
-from agent_hub.adapters import AdapterError, CodexRpcError, export_codex_thread, parse_jsonl
+from agent_hub.adapters import AdapterError, CodexRpcError, SourceUnavailable, codex_rpc_error, export_codex_thread, parse_jsonl
 from agent_hub.bootstrap import _windows_hook_command, setup_clients
 from agent_hub.cli import main
 from agent_hub.client import (
@@ -300,6 +300,82 @@ def test_offline_queue_survives_and_drains_on_retry(cfg, tmp_path):
     assert done["completed"] == 1
     assert done["pending_jobs"] == 0
     assert len(service.events) == 2
+
+
+def test_a_job_whose_source_stays_gone_is_set_aside_after_a_day(cfg, tmp_path):
+    state = LocalState(cfg)
+    missing = tmp_path / "deleted.jsonl"
+    identifier = state.enqueue({"kind": "file", "client": "claude", "path": str(missing)})
+    start, hour = 10**9, 3600
+    drain_queue(cfg, state=state, now=start)
+    drain_queue(cfg, state=state, now=start + 23 * hour)
+    status = state.status()
+    assert (status["pending_jobs"], status["source_gone"]) == (1, 0)
+    assert "no longer exists" in status["errors"][0]["last_error"]
+    drain_queue(cfg, state=state, now=start + 24 * hour)
+    status = state.status()
+    assert (status["pending_jobs"], status["source_gone"], status["errors"]) == (0, 1, [])
+    assert state.due_jobs(now=start + 48 * hour) == []
+    assert [job["id"] for job in state.source_gone()] == [identifier]
+    # The file comes back and changes: the scanner's enqueue revives the job.
+    state.enqueue({"kind": "file", "client": "claude", "path": str(missing)})
+    assert state.status()["source_gone"] == 0 and len(state.due_jobs(now=start + 48 * hour)) == 1
+
+
+def test_any_other_failure_restarts_the_source_gone_clock(cfg, tmp_path):
+    state = LocalState(cfg)
+    state.enqueue({"kind": "file", "client": "claude", "path": str(tmp_path / "flaky.jsonl")})
+    start, hour = 10**9, 3600
+    state.failed(state.due_jobs(now=start)[0], SourceUnavailable("gone"), now=start)
+    state.failed(state.due_jobs(now=start + 12 * hour)[0], ClientError("service down"), now=start + 12 * hour)
+    state.failed(state.due_jobs(now=start + 13 * hour)[0], SourceUnavailable("gone"), now=start + 13 * hour)
+    state.failed(state.due_jobs(now=start + 25 * hour)[0], SourceUnavailable("gone"), now=start + 25 * hour)
+    assert state.status()["source_gone"] == 0  # gone again only since hour 13
+    state.failed(state.due_jobs(now=start + 37 * hour)[0], SourceUnavailable("gone"), now=start + 37 * hour)
+    assert state.status()["source_gone"] == 1
+
+
+def test_queue_command_lists_and_requeues_set_aside_jobs(cfg, tmp_path, capsys):
+    path = tmp_path / "client.json"
+    cfg.save(path)
+    state = LocalState(cfg)
+    first = state.enqueue({"kind": "file", "client": "claude", "path": str(tmp_path / "a.jsonl")})
+    state.enqueue({"kind": "codex-thread", "client": "codex", "path": None, "session_id": "thread-b"})
+    for job in state.due_jobs():
+        state.failed(job, SourceUnavailable("gone"), now=0)
+    for job in state.due_jobs(now=10**6):
+        state.failed(job, SourceUnavailable("gone"), now=10**6)
+    assert main(["--config", str(path), "queue", "list"]) == 0
+    listed = json.loads(capsys.readouterr().out)["source_gone"]
+    assert sorted(job["source"] for job in listed) == [str(tmp_path / "a.jsonl"), "thread-b"]
+    assert main(["--config", str(path), "queue", "requeue"]) == 1
+    capsys.readouterr()
+    assert main(["--config", str(path), "queue", "requeue", first]) == 0
+    assert json.loads(capsys.readouterr().out) == {"requeued": 1}
+    assert main(["--config", str(path), "queue", "requeue", "--all"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"requeued": 1}
+    assert state.status()["source_gone"] == 0 and len(state.due_jobs()) == 2
+
+
+def test_an_older_outbox_keeps_its_jobs_and_gains_the_source_gone_columns(cfg):
+    import sqlite3
+    path = LocalState(cfg).path
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE jobs")
+        db.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, "
+                   "next_attempt REAL NOT NULL DEFAULT 0, last_error TEXT, revision TEXT NOT NULL)")
+        db.execute("INSERT INTO jobs VALUES('old','{\"kind\": \"file\", \"path\": \"/gone.jsonl\"}',2228,0,'unavailable','r')")
+    db.close()
+    state = LocalState(cfg)
+    assert [job["id"] for job in state.due_jobs()] == ["old"]
+    assert state.status()["pending_jobs"] == 1 and state.status()["source_gone"] == 0
+
+
+def test_codex_thread_not_loaded_is_a_gone_source_and_other_errors_are_not():
+    gone = codex_rpc_error({"code": -32600, "message": "thread not loaded: 01a1"})
+    assert isinstance(gone, SourceUnavailable) and "01a1" not in str(gone)
+    other = codex_rpc_error({"code": -32600, "message": "invalid params"})
+    assert isinstance(other, CodexRpcError) and not isinstance(other, SourceUnavailable)
 
 
 def test_state_is_separate_for_other_server(cfg):

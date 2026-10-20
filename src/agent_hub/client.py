@@ -19,7 +19,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
-from .adapters import ADAPTER_VERSION, AdapterError, Transcript, export_codex_thread, parse_jsonl
+from .adapters import ADAPTER_VERSION, AdapterError, SourceUnavailable, Transcript, export_codex_thread, parse_jsonl
 
 
 class ClientError(ValueError):
@@ -303,6 +303,10 @@ class MemoryClient:
         })
 
 
+# A job whose source stays gone this long is set aside instead of retried forever.
+SOURCE_GONE_GRACE_SECONDS = 24 * 3600
+
+
 class LocalState:
     """A local outbox and append checkpoints; no network runs in enqueue()."""
 
@@ -334,6 +338,11 @@ class LocalState:
             # Capture parser version per file; files captured before 0.1.9 stay on version 1.
             if "adapter_version" not in {row[1] for row in db.execute("PRAGMA table_info(files)")}:
                 db.execute("ALTER TABLE files ADD COLUMN adapter_version INTEGER NOT NULL DEFAULT 1")
+            # 0.1.11: when a job's source was first found gone, and when it was set aside.
+            job_columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            for column in ("gone_since", "parked_at"):
+                if column not in job_columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {column} REAL")
             db.execute("DELETE FROM cache")
         if os.name != "nt":
             self.path.chmod(0o600)
@@ -353,15 +362,16 @@ class LocalState:
         identifier = hashlib.sha256(key.encode("utf-8")).hexdigest()
         with self.connect() as db:
             db.execute(
+                # New work for the same source revives a set-aside job.
                 "INSERT INTO jobs(id,payload,revision) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET "
-                "payload=excluded.payload,revision=excluded.revision",
+                "payload=excluded.payload,revision=excluded.revision,gone_since=NULL,parked_at=NULL",
                 (identifier, json.dumps(payload, ensure_ascii=False), uuid.uuid4().hex),
             )
         return identifier
 
     def due_jobs(self, *, now: float | None = None, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM jobs WHERE next_attempt<=? ORDER BY next_attempt,rowid LIMIT ?", (time.time() if now is None else now, limit)).fetchall()
+            rows = db.execute("SELECT * FROM jobs WHERE parked_at IS NULL AND next_attempt<=? ORDER BY next_attempt,rowid LIMIT ?", (time.time() if now is None else now, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def completed(self, job: dict[str, Any]) -> None:
@@ -370,12 +380,35 @@ class LocalState:
         with self.connect() as db:
             db.execute("DELETE FROM jobs WHERE id=? AND revision=?", (job["id"], job["revision"]))
 
-    def failed(self, job: dict[str, Any], error: Exception) -> None:
+    def failed(self, job: dict[str, Any], error: Exception, *, now: float | None = None) -> None:
         attempts = job["attempts"] + 1
+        now = time.time() if now is None else now
         # Exception classes and controlled error messages do not expose payloads.
         message = str(error) if isinstance(error, (ClientError, AdapterError)) else type(error).__name__
+        gone = isinstance(error, SourceUnavailable)
         with self.connect() as db:
-            db.execute("UPDATE jobs SET attempts=?,next_attempt=?,last_error=? WHERE id=? AND revision=?", (attempts, time.time() + min(300, 2 ** min(attempts, 8)), message[:500], job["id"], job["revision"]))
+            # A source gone for the whole grace period is set aside (kept, not
+            # deleted); any other outcome restarts the gone clock.
+            db.execute(
+                "UPDATE jobs SET attempts=?,next_attempt=?,last_error=?,"
+                "gone_since=CASE WHEN ? THEN COALESCE(gone_since,?) END,"
+                "parked_at=CASE WHEN ? AND COALESCE(gone_since,?)<=? THEN ? END WHERE id=? AND revision=?",
+                (attempts, now + min(300, 2 ** min(attempts, 8)), message[:500], gone, now,
+                 gone, now, now - SOURCE_GONE_GRACE_SECONDS, now, job["id"], job["revision"]))
+
+    def source_gone(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT id,payload,attempts,last_error,gone_since,parked_at FROM jobs "
+                              "WHERE parked_at IS NOT NULL ORDER BY parked_at,rowid").fetchall()
+        return [dict(row) for row in rows]
+
+    def requeue(self, identifiers: list[str] | None = None) -> int:
+        """Return set-aside jobs to the queue: all of them, or the given IDs."""
+        with self.connect() as db:
+            reset = "UPDATE jobs SET parked_at=NULL,gone_since=NULL,attempts=0,next_attempt=0,last_error=NULL WHERE parked_at IS NOT NULL"
+            if identifiers is None:
+                return db.execute(reset).rowcount
+            return sum(db.execute(reset + " AND id=?", (identifier,)).rowcount for identifier in identifiers)
 
     def checkpoint(self, identifier: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -401,10 +434,11 @@ class LocalState:
 
     def status(self) -> dict[str, Any]:
         with self.connect() as db:
-            count = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-            errors = [dict(row) for row in db.execute("SELECT id,attempts,last_error FROM jobs WHERE last_error IS NOT NULL ORDER BY attempts DESC LIMIT 20")]
+            count = db.execute("SELECT COUNT(*) FROM jobs WHERE parked_at IS NULL").fetchone()[0]
+            errors = [dict(row) for row in db.execute("SELECT id,attempts,last_error FROM jobs WHERE parked_at IS NULL AND last_error IS NOT NULL ORDER BY attempts DESC LIMIT 20")]
+            gone = db.execute("SELECT COUNT(*) FROM jobs WHERE parked_at IS NOT NULL").fetchone()[0]
             files = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        return {"pending_jobs": count, "tracked_files": files, "errors": errors}
+        return {"pending_jobs": count, "tracked_files": files, "errors": errors, "source_gone": gone}
 
     def cache_key(self, config: ClientConfig, project: str) -> str:
         # Do not reuse another credential's local cache after changing accounts.
@@ -456,7 +490,7 @@ def ingest_file(
     """
     source = Path(path).expanduser().resolve()
     if not source.is_file():
-        raise ClientError("The queued transcript is unavailable; it remains queued for retry.")
+        raise SourceUnavailable("The queued transcript no longer exists; it is retried for a day, then set aside.")
     state = state or LocalState(config)
     previous = state.checkpoint(file_key(config, source, client, session_id))
     version = int(previous.get("adapter_version") or 1) if previous else ADAPTER_VERSION
@@ -651,7 +685,7 @@ def drain_queue(config: ClientConfig, *, state: LocalState | None = None, memory
             results.append(result)
             done += 1
         except Exception as exc:
-            state.failed(job, exc)
+            state.failed(job, exc, now=now)
             failed += 1
             # A service outage should not cost one network timeout per file.
             import httpx

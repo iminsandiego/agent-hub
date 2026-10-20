@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +252,29 @@ def watch(args: argparse.Namespace) -> int:
         return 0
 
 
+def queue_command(args: argparse.Namespace) -> int:
+    state = LocalState(config_for(args))
+    if args.action == "list":
+        jobs = []
+        for job in state.source_gone():
+            payload = json.loads(job["payload"])
+            jobs.append({"id": job["id"], "kind": payload.get("kind"), "client": payload.get("client"),
+                         "source": payload.get("path") or payload.get("session_id"), "last_error": job["last_error"],
+                         "attempts": job["attempts"], "parked_at": _iso(job["parked_at"])})
+        output({"source_gone": jobs})
+        return 0
+    if not args.ids and not args.all:
+        raise ClientError("Name job IDs to requeue, or use --all.")
+    if args.ids and args.all:
+        raise ClientError("Use job IDs or --all, not both.")
+    output({"requeued": state.requeue(None if args.all else args.ids)})
+    return 0
+
+
+def _iso(timestamp: float | None) -> str | None:
+    return None if timestamp is None else datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+
+
 def hook(args: argparse.Namespace) -> int:
     # Hooks are advisory. Failure must remain visible without blocking editing.
     try:
@@ -361,6 +385,11 @@ def register_commands(subparsers) -> None:
     watcher.add_argument("--no-scan", action="store_true")
     watcher.add_argument("--poll-seconds", type=float, default=5)
     watcher.set_defaults(func=watch)
+    queue_parser = subparsers.add_parser("queue", help="List capture jobs set aside because their source is gone, or requeue them")
+    queue_parser.add_argument("action", choices=["list", "requeue"])
+    queue_parser.add_argument("ids", nargs="*", help="Job IDs to requeue (from queue list)")
+    queue_parser.add_argument("--all", action="store_true", help="Requeue every set-aside job")
+    queue_parser.set_defaults(func=queue_command)
     hook_parser = subparsers.add_parser("hook", help="Read a native hook JSON payload from stdin")
     hook_parser.add_argument("--client", choices=["codex", "claude"], required=True)
     hook_parser.set_defaults(func=hook)
