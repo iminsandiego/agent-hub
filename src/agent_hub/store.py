@@ -227,7 +227,10 @@ CONTEXT_HEADER = (
     "in capture order. memory_zoom(\"lo+n\") opens a span into its halves; \"lo+1\" is one original record.\n"
 )
 CHATS_TITLE = "## Recent chats, newest first (each line starts at the chat's opening request)\n"
-MATCHES_TITLE = "## Records matching the task, best first, grouped by chat\n"
+MATCHES_TITLE = "## Records matching the task, best chat first; each chat's latest assistant message follows its matches\n"
+MATCHES_PER_CHAT = 3
+# The start of a chat's latest assistant message (characters); usually its outcome.
+OUTCOME_CHARS = 600
 CONTEXT_SECTIONS = ("notes", "matches", "chats", "history")
 # Common words carry no topic; dropping them keeps a whole prompt usable as a query.
 _STOPWORDS = frozenset("""
@@ -1601,21 +1604,34 @@ class Store:
 
     def _match_lines(self, con: sqlite3.Connection, project: str, hits: list[dict[str, Any]], labels: dict[str, str],
                      terms: list[str]) -> list[tuple[str, str]]:
-        """Event hits as lines, at most three per chat, each naming its chat."""
-        per_chat: dict[str, int] = {}
-        rows = []
+        """Event hits grouped by chat (best chat first), each naming its chat: up to
+        MATCHES_PER_CHAT records, then the chat's latest assistant message, which is
+        usually where the work ended up (a broad question's answer)."""
+        chats: dict[str, list[dict[str, Any]]] = {}
         for hit in hits:
             if hit["type"] != "event" or hit.get("class") == TITLE:
                 continue  # a title already names every matching chat's line
-            if per_chat.get(hit["session_id"], 0) >= 3:
-                continue
-            per_chat[hit["session_id"]] = per_chat.get(hit["session_id"], 0) + 1
-            label = _excerpt(self._chat_label(con, project, hit["session_id"], labels), 90)
-            text = hit["excerpt"]
-            if text is None:  # the search left excerpts to the lines that are kept
-                text = _match_excerpt(con.execute("SELECT substr(text,1,200000) FROM events WHERE id=?", (hit["id"],)).fetchone()[0], terms)
-            rows.append((hit["id"], f"{hit['sequence']}+1 | {_when(hit['timestamp'], hit['timestamp'])} | chat: {label} | "
-                                    f"{hit['role']}: {_flat(_match_excerpt(text, terms, 480))}\n"))
+            group = chats.setdefault(hit["session_id"], [])
+            if len(group) < MATCHES_PER_CHAT:
+                group.append(hit)
+        rows = []
+        for session, group in chats.items():
+            label = _excerpt(self._chat_label(con, project, session, labels), 90)
+            for hit in group:
+                text = hit["excerpt"]
+                if text is None:  # the search left excerpts to the lines that are kept
+                    text = _match_excerpt(con.execute("SELECT substr(text,1,200000) FROM events WHERE id=?", (hit["id"],)).fetchone()[0], terms)
+                rows.append((hit["id"], f"{hit['sequence']}+1 | {_when(hit['timestamp'], hit['timestamp'])} | chat: {label} | "
+                                        f"{hit['role']}: {_flat(_match_excerpt(text, terms, 480))}\n"))
+            if OUTCOME_CHARS:
+                latest = con.execute(
+                    "SELECT e.id,e.sequence,substr(e.text,1,?) AS text,e.source_timestamp FROM events e "
+                    "LEFT JOIN event_classes c ON c.event_id=e.id WHERE e.project=? AND e.session_id=? AND e.role='assistant' "
+                    "AND c.class IS NULL AND trim(e.text)!='' ORDER BY e.sequence DESC LIMIT 1",
+                    (OUTCOME_CHARS * 2, project, session)).fetchone()
+                if latest and latest["id"] not in {hit["id"] for hit in group}:
+                    rows.append((latest["id"], f"{latest['sequence']}+1 | {_when(latest['source_timestamp'], latest['source_timestamp'])} | "
+                                               f"chat: {label} | latest assistant: {_flat(_excerpt(latest['text'], OUTCOME_CHARS))}\n"))
         return rows
 
     def _node_line(self, con: sqlite3.Connection, project: str, node: dict[str, Any]) -> str:

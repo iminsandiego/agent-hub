@@ -126,9 +126,27 @@ def _merge_hooks(value: dict[str, Any], client: str, config_path: Path, executab
         hooks[event] = groups
 
 
+# The keys setup writes for the agent-hub server. Anything else in the entry is the
+# user's or the client's own (Codex stores each tool's approval_mode under "tools").
+_MANAGED_KEYS = ("command", "args", "env_vars", "url", "bearer_token_env_var", "type", "headers")
+
+
+def _managed_view(current: Any) -> Any:
+    if not isinstance(current, dict):
+        return current
+    return {key: value for key, value in current.items() if key in _MANAGED_KEYS}
+
+
+def _merged_entry(current: Any, expected: dict[str, Any]) -> dict[str, Any]:
+    """The expected launch keys over the current entry's other settings."""
+    kept = {key: value for key, value in current.items() if key not in _MANAGED_KEYS} if isinstance(current, dict) else {}
+    return {**expected, **kept}
+
+
 def _may_replace(path: Path, current: Any, expected: dict[str, Any], managed: dict[str, Any]) -> None:
     previous = managed.get(str(path), {}).get("server")
-    if current is not None and current != expected and current != previous:
+    current = _managed_view(current)
+    if current is not None and current != expected and current != _managed_view(previous):
         raise ClientError(f"An unrelated or manually changed MCP named agent-hub already exists in {path}; rename it or resolve the conflict before setup.")
 
 
@@ -186,8 +204,16 @@ def setup_clients(
         current = servers.get("agent-hub")
         current_value = current.unwrap() if hasattr(current, "unwrap") else current
         _may_replace(target, current_value, entry, managed)
-        if current_value != entry:
-            servers["agent-hub"] = tomlkit.item(entry)
+        if _managed_view(current_value) != entry:
+            if hasattr(current, "unwrap"):
+                # Update the launch keys in place, keeping the user's tool approvals.
+                for key in _MANAGED_KEYS:
+                    if key in entry:
+                        current[key] = entry[key]
+                    elif key in current:
+                        del current[key]
+            else:
+                servers["agent-hub"] = tomlkit.item(entry)
         plans.append(FileChange(target, original, tomlkit.dumps(document).encode("utf-8")))
         managed[str(target)] = {"server": entry}
         if hooks:
@@ -215,7 +241,7 @@ def setup_clients(
             raise ClientError("Existing Claude mcpServers must be a JSON object.")
         entry = _server_entry("claude", config, config_path, executable, transport)
         _may_replace(mcp_path, servers.get("agent-hub"), entry, managed)
-        servers["agent-hub"] = entry
+        servers["agent-hub"] = _merged_entry(servers.get("agent-hub"), entry)
         plans.append(FileChange(mcp_path, original, _json_bytes(document)))
         managed[str(mcp_path)] = {"server": entry}
         if hooks:

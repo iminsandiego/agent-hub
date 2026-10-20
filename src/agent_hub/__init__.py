@@ -1,3 +1,3 @@
 """Agent Hub: shared memory, native clients, explicit evidence."""
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"

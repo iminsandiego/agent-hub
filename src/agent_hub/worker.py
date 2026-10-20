@@ -213,7 +213,11 @@ def _unusable(summary: str) -> str | None:
     if "-" * 24 in summary:
         return "contains the length ruler"
     if re.search(r"</?(budget|thinking|system)[:>\s]", summary):
-        return "contains a control tag"
+        # Only when the tag is the answer: a summary of records that discuss such a
+        # tag may quote it (seen in the 0.1.12 pilot).
+        rest = re.sub(r"</?[A-Za-z_][^<>]{0,120}>", "", summary)
+        if sum(character.isalnum() for character in rest) < 40:
+            return "contains a control tag"
     return None
 
 
