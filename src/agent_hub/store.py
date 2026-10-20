@@ -830,11 +830,11 @@ class Store:
             # matches much of the archive); it is checked per candidate instead.
             fetch = max(1000, limit * 20)
 
-            def candidates(scoped: bool) -> list[sqlite3.Row]:
+            def candidates(scoped: bool, offset: int) -> list[sqlite3.Row]:
                 return con.execute(
                     "SELECT h.item_type,h.item_id,bm25(history_fts) AS rank FROM history_fts h "
-                    "WHERE history_fts MATCH ?" + (" AND h.project=?" if scoped else "") + " ORDER BY rank LIMIT ?",
-                    (expression, project, fetch) if scoped else (expression, fetch)).fetchall()
+                    "WHERE history_fts MATCH ?" + (" AND h.project=?" if scoped else "") + " ORDER BY rank LIMIT ? OFFSET ?",
+                    (expression, project, fetch, offset) if scoped else (expression, fetch, offset)).fetchall()
 
             def keep(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
                 kept = []
@@ -855,10 +855,23 @@ class Store:
                                  "class": session if session == DERIVED else own or session})
                 return kept
 
-            rows = candidates(False)
-            matches = keep(rows)
-            if len(rows) == fetch and len(matches) < limit:
-                matches = keep(candidates(True))  # other projects crowded this one out
+            def collect(scoped: bool) -> tuple[list[dict[str, Any]], bool]:
+                # Excluded records (other projects, bookkeeping, metadata) can fill a
+                # page; continue until enough of the conversation itself is found.
+                kept: list[dict[str, Any]] = []
+                for page in range(8):
+                    rows = candidates(scoped, page * fetch)
+                    kept.extend(keep(rows))
+                    if len(rows) < fetch:
+                        return kept, True
+                    if sum(match["class"] not in DEMOTED for match in kept) >= limit:
+                        return kept, False
+                return kept, False
+
+            matches, exhausted = collect(False)
+            if not exhausted and sum(match["class"] not in DEMOTED for match in matches) < limit:
+                scoped, _ = collect(True)  # other projects crowded this one out
+                matches = scoped if len(scoped) > len(matches) else matches
             # bm25 over OR-ed terms favors a record repeating one rare word; weight the
             # best candidates by how many of the query's terms they contain.
             if len(terms) > 1:
@@ -1323,13 +1336,16 @@ class Store:
         batch: list[tuple[str, str, str]] = []
         for row in con.execute("SELECT id,session_id,sequence,role,text,substr(raw,1,400) AS head FROM events "
                                "WHERE project=? ORDER BY sequence", (project,)):
-            value = classify_event(row["role"], row["text"], row["head"])
+            raw = row["head"]
+            # A head is enough for most records; an unread type (queued prompt,
+            # title) or an empty one (image payload) is judged on its whole source,
+            # exactly as at ingest.
+            if len(raw) == 400 and (row["text"].startswith("Unsupported ") or not row["text"].strip()):
+                raw = con.execute("SELECT raw FROM events WHERE id=?", (row["id"],)).fetchone()[0]
+            value = classify_event(row["role"], row["text"], raw)
             if value:
                 batch.append((row["id"], project, value))
                 counts["records_" + value] = counts.get("records_" + value, 0) + 1
-            raw = row["head"]
-            if len(raw) == 400 and row["text"].startswith("Unsupported Claude record ("):
-                raw = con.execute("SELECT raw FROM events WHERE id=?", (row["id"],)).fetchone()[0]
             self._index_record(con, project, row["session_id"], row["sequence"], row["role"], row["text"], raw, value)
             if len(batch) >= 5000:
                 con.executemany("INSERT INTO event_classes VALUES(?,?,?)", batch)
@@ -1622,11 +1638,15 @@ class Store:
 
         frontier = [load(child) for child in node["children"]]
         used = sum(len(render(item)) for item in frontier)
-        heap = [(-(item["hi"] - item["lo"]), item["lo"], item["id"]) for item in frontier if item["children"]]
+        # Spans of only hidden records render as nothing; expanding them would cost
+        # no characters, so the budget could never stop the traversal.
+        heap = [(-(item["hi"] - item["lo"]), item["lo"], item["id"]) for item in frontier if item["children"] and item["summary"]]
         heapq.heapify(heap)
         by_id = {item["id"]: item for item in frontier}
         split = False
-        while heap:
+        for _ in range(4096):
+            if not heap:
+                break
             _, _, identifier = heapq.heappop(heap)
             item = by_id.pop(identifier)
             children = [load(child) for child in item["children"]]
@@ -1640,7 +1660,7 @@ class Store:
             split = True
             for child in children:
                 by_id[child["id"]] = child
-                if child["children"]:
+                if child["children"] and child["summary"]:
                     heapq.heappush(heap, (-(child["hi"] - child["lo"]), child["lo"], child["id"]))
         return "".join(render(item) for item in frontier) if split else ""
 
@@ -1784,6 +1804,8 @@ class Store:
                 "tree_modes": {row["mode"]: row["total"] for row in con.execute("SELECT mode,count(*) AS total FROM tree_nodes WHERE project=? GROUP BY mode", (project,))},
                 "search_backend": "fts5" if self.fts_enabled else "substring_fallback",
                 "schema_version": SCHEMA_VERSION,
+                "classifier": {"current": CLASSIFIER_VERSION, "applied": (con.execute(
+                    "SELECT version FROM derived_versions WHERE project=? AND name='classifier'", (project,)).fetchone() or [None])[0]},
             }
 
     def backup(self, destination: Path | str) -> dict[str, Any]:

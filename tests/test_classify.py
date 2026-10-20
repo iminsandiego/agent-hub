@@ -151,3 +151,68 @@ def test_prune_keeps_records_a_note_cites(store):
         con.execute("INSERT OR REPLACE INTO derived_versions VALUES('alpha','classifier',1)")
     plan = store.prune("alpha")
     assert plan["records_removed"] == 0 and plan["kept_because_a_note_cites_them"] == 1
+
+
+def test_an_image_only_message_is_kept_not_discarded(store):
+    raw = json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "AAAA"}}]}})
+    assert classify_event("user", "", raw) == METADATA
+    assert classify_event("assistant", "", json.dumps({"content": [{"type": "image", "source": {}}]})) == METADATA
+    assert classify_event("assistant", "", json.dumps({"content": [{"type": "thinking", "thinking": "..."}]})) == BOOKKEEPING
+    receipt = store.ingest("alpha", "claude", "m", "s", [record(0, "user", "", raw)])
+    assert (receipt["inserted"], receipt["discarded"]) == (1, 0)
+    assert store.prune("alpha")["records_removed"] == 0
+
+
+def test_rebuild_judges_a_queued_prompt_on_its_whole_source(store):
+    # The discriminator sits past the 400-character head rebuild reads first.
+    raw = json.dumps({"parentUuid": "p" * 500, "isSidechain": False, "type": "attachment",
+                      "attachment": {"type": "queued_command", "prompt": "Also check the porch camera"}})
+    assert raw.index("queued_command") > 400
+    text = "Unsupported Claude record (attachment); raw source retained."
+    store.ingest("alpha", "claude", "m", "s", [record(0, "user", "Check the cameras"), record(1, "system", text, raw)])
+    store.rebuild_tree("alpha")
+    plan = store.prune("alpha")
+    assert plan["records_removed"] == 0 and store.stats("alpha")["events"] == 2
+
+
+def test_search_finds_the_conversation_behind_many_unsearched_matches(store):
+    events = [record(i, "system", f"Unsupported Codex record (future_record_{i}); raw source retained.") for i in range(1100)]
+    events.append(record(2000, "user", "The " + "long " * 60 + "record that matters: the valve key is in the garage."))
+    store.ingest("alpha", "codex", "m", "s", events)
+    hits = store.search("alpha", "record")
+    assert [hit["role"] for hit in hits] == ["user"]
+
+
+def test_span_detail_skips_spans_of_only_hidden_records(store):
+    import time
+    events = [record(0, "user", "Start " + "question " * 80)] + [record(i, "tool", "x" * 20) for i in range(1, 8191)]
+    events.append(record(8191, "assistant", "Done " + "answer " * 80))
+    store.ingest("alpha", "codex", "m", "s", events)
+    root = store.view("alpha", max_nodes=1)[0]
+    with store._read() as con:
+        started = time.monotonic()
+        store._span_detail(con, "alpha", root, 7000)
+        assert time.monotonic() - started < 0.2  # quadratic before 0.1.12's fix: about 0.8 s here
+
+
+def test_classifier_readiness_is_reported(store):
+    assert store.stats("alpha")["classifier"]["applied"] is None
+    store.rebuild_tree("alpha")
+    stats = store.stats("alpha")["classifier"]
+    assert stats["applied"] == stats["current"]
+
+
+def test_stdio_gateway_forwards_sections(tmp_path, monkeypatch):
+    import asyncio
+    import httpx
+    from agent_hub.client import ClientConfig, MemoryClient, create_gateway
+    monkeypatch.setenv("TEST_AGENT_HUB_TOKEN", "synthetic-test-token")
+    cfg = ClientConfig(url="http://127.0.0.1:9867", machine_id="m", token_env="TEST_AGENT_HUB_TOKEN",
+                       mappings=[{"path": str(tmp_path), "project": "atlas"}], state_dir=str(tmp_path / "state"))
+    seen = []
+    memory = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: seen.append(dict(request.url.params)) or httpx.Response(200, json={"text": "ok"})))
+    gateway = create_gateway(cfg, memory=memory)
+    tools = {tool.name: tool for tool in asyncio.run(gateway.list_tools())}
+    assert "sections" in tools["memory_context"].inputSchema["properties"]
+    asyncio.run(gateway.call_tool("memory_context", {"project": "atlas", "sections": ["chats", "history"]}))
+    assert seen[-1]["sections"] == "chats,history"

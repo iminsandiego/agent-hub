@@ -773,9 +773,12 @@ def create_gateway(config: ClientConfig, *, memory: MemoryClient | None = None):
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
     @mcp.tool(annotations=read)
-    def memory_context(project: str, budget_chars: int = 8000, query: str | None = None) -> dict[str, Any]:
-        """Get a bounded project memory overview with source references."""
-        return client.context(project, budget_chars, query)
+    def memory_context(project: str, budget_chars: int = 8000, query: str | None = None,
+                       sections: list[str] | None = None) -> dict[str, Any]:
+        """Get a bounded project memory overview with source references.
+
+        sections limits the pack to some of notes, matches, chats and history (default: all)."""
+        return client.context(project, budget_chars, query, sections)
 
     @mcp.tool(annotations=read)
     def memory_search(project: str, query: str, limit: int = 10) -> Any:

@@ -52,6 +52,9 @@ _MARKER = re.compile(
     r"Claude (system|summary|progress|queue-operation|file-history-snapshot) metadata\.)"
 )
 _UNSUPPORTED = re.compile(r"^Unsupported (Codex|Claude) record \(([^)]+)\)")
+# A message whose content is an image, document or file has no normalized text.
+_NONTEXT = re.compile(r'"type"\s*:\s*"(image|input_image|image_url|localImage|document|input_file|file)"')
+_QUEUED = re.compile(r'"type"\s*:\s*"queued_command"')
 # Record types the adapters do not read that are known to carry nothing worth
 # keeping: request copies, counters, UI and session state. Claude attachments are
 # mostly hook output (including agent-hub's own injected context); a queued
@@ -91,11 +94,13 @@ def classify_event(role: str, text: str, raw: str = "") -> str | None:
     if role == "system" and chat_title(text, raw):
         return TITLE
     if not text.strip():
-        return BOOKKEEPING
+        # Empty text is bookkeeping unless the record carries a non-text payload
+        # (an image-only message); a user record with no text is kept regardless.
+        return METADATA if role == "user" or _NONTEXT.search(raw) else BOOKKEEPING
     unsupported = _UNSUPPORTED.match(text) if role == "system" else None
     if unsupported:
         noise = unsupported[2] in _NOISE_TYPES.get(unsupported[1], set())
-        return BOOKKEEPING if noise and '"queued_command"' not in raw[:2000] else METADATA
+        return BOOKKEEPING if noise and not _QUEUED.search(raw) else METADATA
     if role == "system" and text.startswith("Unsupported JSON value retained"):
         return METADATA
     if kind == "event_msg" and role not in {"user", "assistant"}:
