@@ -33,6 +33,80 @@ class ServiceError(ClientError):
         super().__init__(f"Memory service returned HTTP {status}." + (f" {detail[:300]}" if detail else ""))
 
 
+class LoopbackClient:
+    """The few GET requests a hook makes, for a plain-HTTP loopback server.
+
+    Importing and configuring httpx costs a hook process about 60 ms; a hook to
+    ``http://127.0.0.1:...`` (an SSH tunnel or a local server) needs none of its
+    features. Same authentication, status handling and timeout as MemoryClient;
+    no redirects or proxies are followed (MemoryClient follows none either).
+    """
+
+    def __init__(self, config: "ClientConfig", *, timeout: float):
+        self.config = config
+        self.timeout = timeout
+
+    @staticmethod
+    def usable(config: "ClientConfig") -> bool:
+        parts = urlsplit(config.url)
+        host = (parts.hostname or "").lower()
+        try:
+            loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        return parts.scheme == "http" and loopback
+
+    def close(self) -> None:
+        pass
+
+    def request(self, method: str, path: str, *, auth: bool = True, params: dict[str, Any] | None = None) -> Any:
+        import http.client
+        from urllib.parse import urlencode
+        if method != "GET":
+            raise ValueError("LoopbackClient only performs GET requests")
+        parts = urlsplit(self.config.url)
+        target = parts.path.rstrip("/") + "/" + path.lstrip("/") + ("?" + urlencode(params) if params else "")
+        headers = {"Authorization": "Bearer " + self.config.token()} if auth else {}
+        connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=self.timeout)
+        try:
+            connection.request("GET", target, headers=headers)
+            response = connection.getresponse()
+            body = response.read()
+        finally:
+            connection.close()
+        if not 200 <= response.status < 300:
+            detail = ""
+            try:
+                value = json.loads(body)
+                value = value.get("detail", value.get("error", "")) if isinstance(value, dict) else ""
+                detail = value if isinstance(value, str) else ""
+            except ValueError:
+                pass
+            raise ServiceError(response.status, detail)
+        return json.loads(body)
+
+    def project_path(self, project: str, suffix: str) -> str:
+        self.config.check_project(project)
+        return f"v1/projects/{quote(project, safe='')}/{suffix}"
+
+    def context(self, project: str, budget_chars: int = 8000, query: str | None = None,
+                sections: list[str] | None = None) -> dict[str, Any]:
+        return MemoryClient.context(self, project, budget_chars, query, sections)  # same parameters and path
+
+
+def _unreachable(exc: Exception) -> bool:
+    """Whether a hook's request failed because the service could not be reached."""
+    import http.client
+    if isinstance(exc, http.client.HTTPException):
+        return True
+    import httpx  # only after an error; a healthy loopback hook never imports it
+    return isinstance(exc, httpx.TransportError)
+
+
+def hook_client(config: "ClientConfig", *, timeout: float) -> Any:
+    return LoopbackClient(config, timeout=timeout) if LoopbackClient.usable(config) else MemoryClient(config, timeout=timeout)
+
+
 def validate_project(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value):
         raise ClientError("Project IDs start with a lowercase letter and use at most 64 lowercase letters, digits, underscores, or hyphens.")
@@ -265,10 +339,13 @@ class MemoryClient:
         self.config.check_project(project)
         return f"v1/projects/{quote(project, safe='')}/{suffix}"
 
-    def context(self, project: str, budget_chars: int = 8000, query: str | None = None) -> dict[str, Any]:
+    def context(self, project: str, budget_chars: int = 8000, query: str | None = None,
+                sections: list[str] | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {"budget_chars": max(512, min(budget_chars, 24000))}
         if query:
             params["query"] = query
+        if sections:
+            params["sections"] = ",".join(sections)
         return self.request("GET", self.project_path(project, "context"), params=params)
 
     def search(self, project: str, query: str, limit: int = 10) -> Any:
@@ -333,6 +410,9 @@ class LocalState:
                 );
                 CREATE TABLE IF NOT EXISTS cache (
                     id TEXT PRIMARY KEY, text TEXT NOT NULL, captured_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS prompted (
+                    session TEXT PRIMARY KEY, at REAL NOT NULL
                 );
             """)
             # Capture parser version per file; files captured before 0.1.9 stay on version 1.
@@ -409,6 +489,21 @@ class LocalState:
             if identifiers is None:
                 return db.execute(reset).rowcount
             return sum(db.execute(reset + " AND id=?", (identifier,)).rowcount for identifier in identifiers)
+
+    @staticmethod
+    def _prompt_key(session: str) -> str:
+        return hashlib.sha256(session.encode("utf-8")).hexdigest()
+
+    def prompted(self, session: str) -> bool:
+        """Whether this native session's first prompt already got matching history."""
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM prompted WHERE session=?", (self._prompt_key(session),)).fetchone() is not None
+
+    def mark_prompted(self, session: str, *, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        with self.connect() as db:
+            db.execute("DELETE FROM prompted WHERE at<?", (now - 90 * 86400,))
+            db.execute("INSERT OR IGNORE INTO prompted VALUES(?,?)", (self._prompt_key(session), now))
 
     def checkpoint(self, identifier: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -539,8 +634,8 @@ def _ingest_file_version(
             duplicates += int(receipt.get("duplicates", 0))
             offset = batch[-1]["_end_offset"]
             state.save_checkpoint(identifier, data, offset, transcript.session_id, target, stat, adapter_version=adapter_version)
-            if receipt.get("suppressed"):
-                break
+            if receipt.get("suppressed") or receipt.get("excluded"):
+                break  # the server keeps none of this session
         # Blank separator lines are safe to checkpoint after all events commit.
         state.save_checkpoint(identifier, data, transcript.complete_bytes, transcript.session_id, target, stat, adapter_version=adapter_version)
         from .codex_titles import index_title
@@ -585,12 +680,18 @@ def enqueue_hook(config: ClientConfig, payload: dict[str, Any], client: str, sta
     })
 
 
-def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars: int = 8000, memory: MemoryClient | None = None) -> dict[str, Any]:
+# Claude Code delivers at most 10,000 characters of one hook's additionalContext
+# to the model (more becomes a preview of a saved file; measured with 2.1.304),
+# so each hook stays under it. Startup and the first prompt each get this much.
+HOOK_CONTEXT_CHARS = 9500
+
+
+def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars: int = HOOK_CONTEXT_CHARS, memory: MemoryClient | None = None) -> dict[str, Any]:
     state = LocalState(config)
     project = config.resolve_project(payload.get("cwd"))
     key = state.cache_key(config, project)
     owned = memory is None
-    connection = memory or MemoryClient(config, timeout=0.6)
+    connection = memory or hook_client(config, timeout=0.6)
     try:
         try:
             result = connection.context(project, budget_chars=budget_chars)
@@ -603,9 +704,7 @@ def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars:
         except (OSError, TimeoutError) as exc:
             text = cached_context(state, key)
         except Exception as exc:
-            # httpx is imported lazily to keep SessionEnd enqueue startup small.
-            import httpx
-            if not isinstance(exc, httpx.TransportError):
+            if not _unreachable(exc):
                 raise
             text = cached_context(state, key)
     finally:
@@ -616,9 +715,51 @@ def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars:
     return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": bounded_context(text, budget_chars)}}
 
 
+def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars: int = HOOK_CONTEXT_CHARS,
+                   memory: MemoryClient | None = None) -> dict[str, Any]:
+    """Records matching a chat's first prompt, grouped by chat (UserPromptSubmit).
+
+    Only the first prompt of a session is searched; later prompts return
+    nothing, so a long chat is not refilled with history every turn. An outage
+    or slow service also returns nothing rather than delaying the prompt.
+    """
+    prompt = payload.get("prompt")
+    session = payload.get("session_id")
+    if not isinstance(prompt, str) or not prompt.strip() or not isinstance(session, str) or not session:
+        return {}
+    state = LocalState(config)
+    if state.prompted(session):
+        return {}
+    project = config.resolve_project(payload.get("cwd"))
+    owned = memory is None
+    connection = memory or hook_client(config, timeout=1.5)
+    try:
+        try:
+            result = connection.context(project, budget_chars=budget_chars, query=prompt.strip()[:1000], sections=["matches"])
+        except ServiceError as exc:
+            if exc.status in {401, 403, 404}:
+                raise
+            return {}
+        except (OSError, TimeoutError):
+            return {}
+        except Exception as exc:
+            if not _unreachable(exc):
+                raise
+            return {}
+    finally:
+        if owned:
+            connection.close()
+    # Marked only once the service answered, so an outage leaves the next prompt to try.
+    state.mark_prompted(session)
+    text = str(result.get("text", ""))
+    if not result.get("event_ids"):
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": bounded_context(text, budget_chars)}}
+
+
 def bounded_context(text: str, budget: int) -> str:
     """Keep source lines intact when fitting historical context into a hook."""
-    budget = max(256, min(budget, 8000))
+    budget = max(256, min(budget, HOOK_CONTEXT_CHARS))
     if len(text) <= budget:
         return text
     suffix = "\n[Additional history omitted; retrieve it with memory tools.]"
@@ -703,9 +844,12 @@ def create_gateway(config: ClientConfig, *, memory: MemoryClient | None = None):
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
     @mcp.tool(annotations=read)
-    def memory_context(project: str, budget_chars: int = 8000, query: str | None = None) -> dict[str, Any]:
-        """Get a bounded project memory overview with source references."""
-        return client.context(project, budget_chars, query)
+    def memory_context(project: str, budget_chars: int = 8000, query: str | None = None,
+                       sections: list[str] | None = None) -> dict[str, Any]:
+        """Get a bounded project memory overview with source references.
+
+        sections limits the pack to some of notes, matches, chats and history (default: all)."""
+        return client.context(project, budget_chars, query, sections)
 
     @mcp.tool(annotations=read)
     def memory_search(project: str, query: str, limit: int = 10) -> Any:

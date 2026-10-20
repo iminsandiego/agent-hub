@@ -119,8 +119,8 @@ The environment variable named by `token_env` (default `AGENT_HUB_TOKEN`) takes 
 
 | Client | MCP registration | Hook registration | Agent Hub handlers |
 | --- | --- | --- | --- |
-| Codex | `CODEX_HOME/config.toml`, default `~/.codex/config.toml` | `CODEX_HOME/hooks.json` | `SessionStart`, `Stop`, `SessionEnd` |
-| Claude Code | User MCP file, normally `~/.claude.json` | `CLAUDE_CONFIG_DIR/settings.json`, default `~/.claude/settings.json` | `SessionStart`, `Stop`, `SessionEnd`, `SubagentStop` |
+| Codex | `CODEX_HOME/config.toml`, default `~/.codex/config.toml` | `CODEX_HOME/hooks.json` | `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` |
+| Claude Code | User MCP file, normally `~/.claude.json` | `CLAUDE_CONFIG_DIR/settings.json`, default `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`, `SubagentStop` |
 | T3 Code | Underlying Codex or Claude provider on its execution host | Underlying provider, where supported | No invented T3-specific memory hook |
 
 Codex [documents shared CLI/IDE MCP configuration](https://developers.openai.com/codex/mcp). Claude [documents MCP scopes separately from hook settings](https://code.claude.com/docs/en/mcp). For a custom Claude profile, supply both `--claude-home` and `--claude-mcp-file` with the verified paths for that profile; Agent Hub does not guess where another account's global application state lives.
@@ -176,15 +176,31 @@ The installed `Stop` and `SessionEnd` handlers only enqueue the source path or n
 
 A hook can name a source that is never saved: a Claude Code subagent or non-interactive run that writes no transcript, or a Codex background thread the app-server answers with "thread not loaded". Such a job is retried while its source stays missing for 24 hours, then set aside (0.1.11). It is kept, not deleted; it no longer counts as pending or as an error, and `doctor` reports the number under `source_gone`. Any other failure in between restarts the 24 hours. New work for the same source (a changed file, another hook) brings the job back. `agent-hub queue list` shows set-aside jobs with their path or thread ID, and `agent-hub queue requeue ID…` or `--all` retries them.
 
-`SessionStart` requests live context for the mapped directory, capped at 8,000
-characters and trimmed at source-line boundaries. Persistent offline memory
-caches are no longer written or used; upgrade clears their old rows. An outage
-produces no historical injection, so forgotten content cannot return from a
-seven-day fallback. Use `agent-hub context` for a live manual lookup.
+`SessionStart` requests live context for the mapped directory: the recent chats
+(each named by its title or opening request) and an overview of the whole
+history, capped at 9,500 characters and trimmed at source-line boundaries. The
+first prompt of each session (`UserPromptSubmit`) adds up to another 9,500
+characters of records matching that prompt, at most two per chat, each naming its
+chat; later prompts add nothing, and a slow or unavailable service adds nothing
+rather than delaying the prompt (1.5-second request timeout). Persistent offline
+memory caches are no longer written or used; upgrade clears their old rows. An
+outage produces no historical injection, so forgotten content cannot return from
+a seven-day fallback. Use `agent-hub context` for a live manual lookup.
+
+Both harnesses limit how much hook text reaches the model, measured on agent-vm
+on 2026-10-20 by injecting numbered markers and asking which arrived. Claude
+Code 2.1.304 delivers up to 10,000 characters of one hook's `additionalContext`
+(9,900 arrived whole); above that the model sees only a short preview and the
+path of a saved file. Codex 0.163.0 counts its per-hook `additionalContextLimit`
+in tokens, about 2,500 by default, and past it keeps the start and end of the
+text; with the limit at 9,500 tokens a 30,000-character injection arrived whole.
+Setup therefore sets Codex's limit to 4,000 tokens for both context hooks, room
+for the client's 9,500 characters. Re-run `agent-hub setup` after upgrading to
+install the `UserPromptSubmit` hook; Codex asks to trust changed hooks.
 
 Current [Codex hook documentation](https://learn.chatgpt.com/docs/hooks) exposes startup/resume/clear/compact contexts, permits a null transcript path, and makes `SessionEnd` synchronous with a short timeout. Transcript format is explicitly unstable. End events are not a complete subagent archive. Agent Hub also captures at `Stop` to reduce dependence on final close behavior.
 
-Current [Claude hook documentation](https://code.claude.com/docs/en/hooks) supports command hooks and an `additionalContext` response at `SessionStart`. Agent Hub uses its executable-plus-arguments form and captures a `SubagentStop` source through `agent_transcript_path`, keeping the child source distinct from its parent.
+Current [Claude hook documentation](https://code.claude.com/docs/en/hooks) supports command hooks and an `additionalContext` response at `SessionStart` and `UserPromptSubmit`. Agent Hub uses its executable-plus-arguments form and captures a `SubagentStop` source through `agent_transcript_path`, keeping the child source distinct from its parent.
 
 ### Keep the watcher running
 

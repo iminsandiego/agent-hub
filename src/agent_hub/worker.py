@@ -200,6 +200,23 @@ def _over_limit(summary: str) -> str:
             "and cutting just enough of the least valuable items to end before this cut:\n" + cut + "| <- LIMIT")
 
 
+def _unusable(summary: str) -> str | None:
+    """Why a summary that fits is still not a summary, or None.
+
+    A trial of small models (Haiku 5.5, 0.1.12) sometimes answered a hard
+    source with the prompt's ruler of dashes or a stray control tag; both fit
+    the byte limit and would otherwise be stored as the node's line.
+    """
+    letters = sum(character.isalnum() for character in summary)
+    if letters < 8 or letters < len(summary) * 0.4:
+        return "mostly punctuation (a copy of the length ruler?)"
+    if "-" * 24 in summary:
+        return "contains the length ruler"
+    if re.search(r"</?(budget|thinking|system)[:>\s]", summary):
+        return "contains a control tag"
+    return None
+
+
 def _accepted(connection, project, stage, item) -> None:
     connection.execute("DELETE FROM rejections WHERE project=? AND stage=? AND item=?", (project, stage, item))
     connection.commit()
@@ -423,6 +440,9 @@ def run_worker(settings: ServerSettings, *, project: str, use_llm: bool = False,
                         if result["calls"] >= max_calls:
                             raise RuntimeError("Call budget exhausted before the summary fit 512 bytes; existing fallback retained")
                         raise OutputRejected("Summary empty or exceeds hard 512-byte output limit; existing fallback retained")
+                    problem = _unusable(summary)
+                    if problem:
+                        raise OutputRejected(f"Summary is not usable ({problem}); existing fallback retained")
                     try:
                         store.complete_summary(project, task["id"], summary, task["source_hash"], provider.model)
                     except (KeyError, ValueError) as exc:

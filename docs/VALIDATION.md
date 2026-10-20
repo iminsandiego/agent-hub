@@ -1,3 +1,46 @@
+## 0.1.12 what a new chat learns, October 20, 2026
+
+All home-archive measurements used an online backup of the live database on agent-vm (501,895 records, 2026-10-20 06:04 UTC), never the live file.
+
+**Composition.** Record text plus raw source by class: bookkeeping 224,158 records, 3,396 MB (Codex `event_msg` 2.1 GB, Codex `compacted` snapshots 1.0 GB); tool 117,248, 1,293 MB; Codex approval-reviewer threads (782) 106,519, 733 MB; conversation 16,796, 196 MB; other subagent threads 20,915, 183 MB; injected 15,178, 87 MB. The 0.1.11 startup context (8,000 characters) was almost entirely event markers, token counts and tool output.
+
+**Hook limits** (agent-vm, numbered markers injected by a test hook, isolated sessions that wrote no transcript). Claude Code 2.1.304: 9,900 characters of `additionalContext` arrived whole for both `SessionStart` and `UserPromptSubmit`; 10,100 became a preview plus a saved-file path. Codex 0.163.0 (`codex exec --dangerously-bypass-hook-trust` in a temporary `CODEX_HOME`): with no limit, a 30,000-character injection (7,500 tokens) kept its start and end with "…5031 tokens truncated…"; with `additionalContextLimit` 9500 it arrived whole, so the limit counts tokens.
+
+**Rebuild and prune** (scratch copy): reclassify and rebuild 95–100 s; prune report 61 s; apply 173 s (341,570 records and 4.2 of 5.9 GB of record text removed, 160,325 kept, positions 0..160,324, 320,642 tree nodes; write-ahead log peaked under 1.9 GB with `secure_delete` off); VACUUM 32 s, 8.1 GB to 2.55 GB. Startup context 0.01–0.05 s; first-prompt matches over the 25 questions: median 69 ms, p90 95 ms, max 117 ms (177/320/387 ms before batching class lookups, reading each text once, ranking row ids first, a linear excerpt window and building excerpts only for kept lines; an earlier project-filtered FTS query took up to 7.6 s). The hook process itself, against an instant local stub on the Mac: 34 ms median with the loopback client, 55 ms with httpx.
+
+**What a new chat can answer.** 25 questions about specific facts from past chats (April–October 2026; IPs, paths, file names, quote and commit IDs), each with keywords verified in its chat's stored text and absent from the question, written by Sonnet 5.5 and reviewed. Haiku 5.5 (low effort) answered each from the injected text only; correct = every keyword in the answer.
+
+| Injected | Characters | Keywords present | Answered correctly |
+| --- | --- | --- | --- |
+| nothing | 0 | – | 0/25 |
+| 0.1.11 startup | 7,988 | 1/25 | 1/25 |
+| 0.1.12 startup (recent chats + history) | 9,392 | 0/25 | 0/25 |
+| 0.1.12 startup + first-prompt matches (first version) | 16,958 | 15/25 | 13/25 |
+| 64,000-character pack (matches, chats, history) | 63,958 | 15/25 | 12/25 |
+| 0.1.12 startup + first-prompt matches (final: densest-window excerpts, term-coverage rerank, three per chat) | 17,923 | 21/25 | 21/25 |
+
+A larger pack did not help; the first prompt's matches did. The startup section names recent work but holds few exact facts.
+
+**Summary model trial** (5 regions of 8 conversation records, bottom-up as the worker does it, on the subscriptions: Claude through isolated `claude -p`, Codex through `codex exec --ephemeral` in a temporary `CODEX_HOME` with the worker's prompt as `model_instructions_file`). "Fits" = at most 512 bytes; "junk" = an accepted line the 0.1.12 check rejects.
+
+| Model / effort | Calls | Fits first try | Fits after retries | Junk | Input tokens per call (cached) | Output | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Haiku 5.5 / low | 58 | 68% | 95% | 3 (ruler copies) | 5,560 (12%) | 634 | 4.0 |
+| Haiku 5.5 / medium | 54 | 71% | 100% | 2 (ruler, `<budget:…>` tag) | 5,480 (37%) | 1,180 | 5.9 |
+| Sonnet 5.5 / low | 56 | 64% | 97% | 0 | 4,601 (14%) | 210 | 4.8 |
+| GPT-6-Luna / low | 75 (cap) | 48% | 62% | 0 | 13,712 (52%) | 153 | 17.1 |
+| GPT-6-Luna / medium | 75 (cap) | 50% | 68% | 0 | 13,593 (58%) | 168 | 17.0 |
+| GPT-6.1-Sol / low | 53 | 79% | 98% | 0 | 12,933 (55%) | 127 | 16.1 |
+| GPT-6.1-Sol / medium | 53 | 81% | 98% | 0 | 13,197 (57%) | 158 | 20.8 |
+
+Reading the lines side by side: Haiku and GPT-6-Luna mixed preceding-context facts (the user's earlier words) into summaries of tool-output leaves; Luna rarely fit and fell back to excerpts. Sonnet and GPT-6.1-Sol kept to each record, kept attribution and exact IDs and paths; Sol fit most often and drew more facts from long tool output; Sonnet abbreviated raw coordinates that Sol copied. Sol low and medium were nearly identical. About 10,000 of Sol's input tokens per call are `codex exec`'s own instructions and tool list (measured with an empty prompt), mostly cached. GPT-6.1-Luna was not offered by the Codex catalog (gpt-6-luna was tested). Recommendation if summaries are enabled: GPT-6.1-Sol at low effort on the Codex subscription, Sonnet 5.5 at low effort as the alternative; not Haiku or Luna. The worker would need a subscription backend (it calls an OpenAI-compatible API today), ideally one long-lived `codex app-server` session rather than a process per call. Input averaged about 2.2 characters per token (JSON-escaped, code-heavy text).
+
+**Dry-run usage estimate** (worker rules simulated over the cleaned tree; nothing written): conversation only, 2,656 leaf and 13,857 merge calls for a first pass (16,513; about 23,000 with the measured shortening rate), mean input 21,000 characters (19,000 of it preceding context and span detail), about 67 calls a day for new history; with tool output included, 120,144 calls and 474 a day. Preceding context of 4,000 and span detail of 2,000 characters would cut mean input to 8,800 characters. With GPT-6.1-Sol (measured 1.23 calls per node, about 10,000 tokens of `codex exec` overhead per call), the conversation-only first pass is about 20,000 calls and 400 million input tokens (280 million with the smaller context), at 16 s per sequential call about 90 hours; afterwards about 80 calls and 1.6 million tokens a day.
+
+macOS, CPython 3.12.14: `PYTHONPATH=src python -m pytest -q` ran 388 tests, all passed (one upstream Starlette warning).
+
+---
+
 ## 0.1.11 set-aside capture jobs, October 20, 2026
 
 On the home Mac, 124 queued capture jobs had 2,000+ attempts: 28 transcripts missing from disk and 96 Codex threads. A read-only `thread/read` through the installed Codex 0.163.0 app-server returned "thread not loaded" for every thread, and none had a rollout file. The VM had 6 missing transcripts. None of the 34 missing transcripts appears in either watcher's scan baseline, so they were never on disk.

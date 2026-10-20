@@ -69,7 +69,7 @@ def _windows_hook_command(argv: list[str]) -> str:
 
 def _hook_handler(client: str, config_path: Path, executable: str, event: str) -> dict[str, Any]:
     argv = ["-m", "agent_hub.cli", "--config", str(config_path.resolve()), "hook", "--client", client]
-    handler: dict[str, Any] = {"type": "command", "timeout": 2 if event == "SessionStart" else 1}
+    handler: dict[str, Any] = {"type": "command", "timeout": {"SessionStart": 2, "UserPromptSubmit": 3}.get(event, 1)}
     if client == "claude":
         # Current Claude exec-form hooks never reparse paths through a shell.
         handler.update(command=executable, args=argv)
@@ -80,8 +80,12 @@ def _hook_handler(client: str, config_path: Path, executable: str, event: str) -
         handler["command"] = command
         if os.name == "nt":
             handler["commandWindows"] = command
-        if event == "SessionStart":
-            handler["additionalContextLimit"] = 2500
+        if event in {"SessionStart", "UserPromptSubmit"}:
+            # Codex counts this limit in tokens and, past it, keeps the start and
+            # end of the text (default about 2,500; measured with 0.163.0). The
+            # client sends at most HOOK_CONTEXT_CHARS (9,500) characters; code- and
+            # JSON-heavy history runs about 2.2 characters per token (4,300 tokens).
+            handler["additionalContextLimit"] = 6000
     return handler
 
 
@@ -99,7 +103,7 @@ def _merge_hooks(value: dict[str, Any], client: str, config_path: Path, executab
     hooks = value.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise ClientError("Existing hooks must be an object; setup did not overwrite them.")
-    events = ["SessionStart", "Stop", "SessionEnd"]
+    events = ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"]
     if client == "claude":
         events.append("SubagentStop")
     for event in events:

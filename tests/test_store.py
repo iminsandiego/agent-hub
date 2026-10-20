@@ -488,3 +488,73 @@ def test_a_moved_transcript_is_the_same_session_but_a_parser_change_is_not(store
     assert moved["duplicates"] == 1
     with pytest.raises(ValueError, match="metadata"):
         store.ingest("alpha", "codex", "m", "s", [event(0)], {"adapter_version": 2, "source_path": "/sessions/a.jsonl"})
+
+
+def test_recent_chats_name_each_chat_newest_first_and_follow_a_reorder(store):
+    old = ingest(store, [event(0, "Plan the vegetable garden", timestamp="2024-01-01T10:00:00Z"),
+                         event(1, "Raised beds, south fence.", role="assistant", timestamp="2024-01-01T10:05:00Z")], session="old")
+    ingest(store, [event(0, "Fix the sprinkler timer", timestamp="2026-10-01T10:00:00Z"),
+                   event(1, "Unsupported Claude record (custom-title); raw source retained.", role="system",
+                         raw='{"type":"custom-title","customTitle":"Sprinkler fix"}', timestamp="2026-10-01T10:01:00Z")],
+           session="new")
+    text = store.context("alpha", 4000, sections=["chats"])["text"]
+    lines = [line for line in text.splitlines() if line[:1].isdigit()]
+    assert "Sprinkler fix — Fix the sprinkler timer" in lines[0] and "Plan the vegetable garden" in lines[1]
+    # Backfilled later, the older chat sorts first once reordered; its line follows its new position.
+    ingest(store, [event(2, "Add tomatoes", timestamp="2024-01-01T10:10:00Z")], session="old")
+    store.reorder_by_time("alpha", apply=True)
+    text = store.context("alpha", 4000, sections=["chats"])["text"]
+    assert [line.split(" | ")[0] for line in text.splitlines() if line[:1].isdigit()] == ["3+1", "0+1"]
+    assert store.get_event("alpha", old["event_ids"][0])["sequence"] == 0
+
+
+def test_matches_are_grouped_by_chat_and_sections_are_validated(store):
+    ingest(store, [event(i, f"garden hose note {i}") for i in range(5)], session="one")
+    ingest(store, [event(0, "garden shed plan")], session="two")
+    pack = store.context("alpha", 6000, "please tell me about the garden", ["matches"])
+    lines = [line for line in pack["text"].splitlines() if line[:1].isdigit()]
+    assert len(lines) == 4 and sum("garden hose" in line for line in lines) == 3  # at most three per chat
+    assert all(" | chat: " in line for line in lines) and "## History" not in pack["text"]
+    with pytest.raises(ValueError, match="sections"):
+        store.context("alpha", 4000, sections=["everything"])
+
+
+def test_queries_drop_common_words_and_excerpts_show_the_match(store):
+    long = "filler " * 400 + "the sprinkler valve is in the side yard" + " filler" * 400
+    ingest(store, [event(0, long)])
+    hit = store.search("alpha", "where is the sprinkler valve?")[0]
+    assert "sprinkler valve" in hit["excerpt"] and hit["excerpt"].startswith("…")
+    assert store._terms("what is it") == ["what", "is", "it"]  # only common words: keep them
+    assert store._terms("where is the sprinkler valve") == ["sprinkler", "valve"]
+
+
+def test_the_excerpt_window_matches_the_original_choice():
+    import random
+    from agent_hub.store import _match_excerpt
+
+    def reference(text, terms, maximum=1000):
+        # The pre-optimization choice: for each hit, count distinct terms from it onward in its window.
+        if len(text) <= maximum:
+            return text
+        lowered = text.lower()
+        hits = sorted((m.start(), t) for t in {x.lower() for x in terms} for m in re.finditer(re.escape(t), lowered))
+        if not hits:
+            return text[: maximum - 1] + "…"
+        width = maximum - 2
+        best, best_start = -1, 0
+        for index, (position, _) in enumerate(hits):
+            start = max(0, position - width // 4)
+            covered = {t for at, t in hits[index:] if at < start + width}
+            if len(covered) > best:
+                best, best_start = len(covered), start
+        start = max(0, min(best_start, len(text) - width))
+        end = min(len(text), start + width)
+        return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+    rng = random.Random(7)
+    words = ["valve", "garden", "hose", "key", "filler", "x", "the"]
+    for _ in range(300):
+        text = " ".join(rng.choice(words) for _ in range(rng.randint(50, 900)))
+        terms = rng.sample(["valve", "garden", "hose", "key", "absent"], rng.randint(1, 4))
+        size = rng.choice([80, 200, 1000])
+        assert _match_excerpt(text, terms, size) == reference(text, terms, size)

@@ -19,7 +19,7 @@ from agent_hub.bootstrap import _windows_hook_command, setup_clients
 from agent_hub.cli import main
 from agent_hub.client import (
     ClientConfig, ClientError, LocalState, MemoryClient, ServiceError,
-    discover_paths, drain_queue, enqueue_hook, hook_context, ingest_file,
+    discover_paths, drain_queue, enqueue_hook, hook_context, ingest_file, prompt_context,
     validate_url,
 )
 
@@ -398,6 +398,37 @@ def test_live_context_is_bounded_and_offline_never_reinjects_forgotten_cache(cfg
         hook_context(cfg, payload, memory=denied)
 
 
+def test_first_prompt_gets_matching_history_once_per_session(cfg, tmp_path):
+    seen = []
+
+    def service(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"text": "HISTORICAL UNTRUSTED DATA\n12+1 | x | chat: c | user: garden", "event_ids": ["e1"]})
+    online = MemoryClient(cfg, transport=httpx.MockTransport(service))
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "native-1", "cwd": str(tmp_path / "work"),
+               "prompt": "Where is the garden app deployed?"}
+    first = prompt_context(cfg, payload, memory=online)
+    assert first["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "12+1" in first["hookSpecificOutput"]["additionalContext"]
+    assert seen[0]["sections"] == "matches" and seen[0]["query"] == "Where is the garden app deployed?"
+    assert prompt_context(cfg, {**payload, "prompt": "and the second prompt?"}, memory=online) == {}
+    assert len(seen) == 1
+    other = prompt_context(cfg, {**payload, "session_id": "native-2"}, memory=online)
+    assert other and len(seen) == 2
+    empty = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"text": "header", "event_ids": []})))
+    assert prompt_context(cfg, {**payload, "session_id": "native-3"}, memory=empty) == {}
+    offline = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
+    assert prompt_context(cfg, {**payload, "session_id": "native-4"}, memory=offline) == {}
+    # An outage on the first prompt leaves the next prompt to try again.
+    assert prompt_context(cfg, {**payload, "session_id": "native-4", "prompt": "the garden again"}, memory=online)
+
+
+def test_hook_context_stays_under_the_claude_code_hook_limit(cfg, tmp_path):
+    online = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"text": "history line\n" * 5000})))
+    text = hook_context(cfg, {"cwd": str(tmp_path / "work")}, budget_chars=50000, memory=online)["hookSpecificOutput"]["additionalContext"]
+    assert 9000 < len(text) <= 9500
+
+
 def test_stale_cache_expires_and_credential_change_cannot_reuse_cache(cfg, tmp_path, monkeypatch):
     state = LocalState(cfg)
     key = state.cache_key(cfg, "atlas")
@@ -446,6 +477,12 @@ def test_setup_preserves_unrelated_settings_is_idempotent_and_has_no_secret(cfg,
     settings = json.loads(claude_settings.read_text())
     assert settings["permissions"]["deny"] == ["Bash(rm *)"]
     assert settings["hooks"]["SessionStart"][0]["hooks"][0]["args"]
+    prompt_hook = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    assert prompt_hook["timeout"] == 3 and "hook" in prompt_hook["args"]
+    codex_prompt = [h for group in hooks["hooks"]["UserPromptSubmit"] for h in group["hooks"]][0]
+    codex_start = [h for group in hooks["hooks"]["SessionStart"] for h in group["hooks"]][0]
+    # Codex counts additionalContextLimit in tokens (measured with 0.163.0).
+    assert codex_prompt["additionalContextLimit"] == codex_start["additionalContextLimit"] == 6000
     for target in [codex_file, hooks_file, claude_mcp, claude_settings]:
         assert "synthetic-test-token" not in target.read_text()
 
@@ -743,3 +780,47 @@ def test_checkpoints_from_before_versioning_count_as_version_1(cfg, tmp_path):
     with state.connect() as db:
         db.execute("INSERT INTO files(id,offset,prefix_sha,session_id,project,mtime_ns,size) VALUES('legacy',0,'x','s','atlas',0,0)")
     assert state.checkpoint("legacy")["adapter_version"] == 1
+
+
+def test_hooks_reach_a_plain_http_loopback_server_without_httpx(cfg, tmp_path):
+    from agent_hub.client import LoopbackClient, hook_client
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            if "harbor" in self.path:
+                body, status = json.dumps({"detail": "not authorized"}).encode(), 403
+            else:
+                body, status = json.dumps({"text": "HISTORICAL UNTRUSTED DATA\n3+1 | x | chat: c | user: hose", "event_ids": ["e"]}).encode(), 200
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        cfg.url = f"http://127.0.0.1:{server.server_address[1]}/hub"
+        client = hook_client(cfg, timeout=2)
+        assert isinstance(client, LoopbackClient)
+        result = client.context("atlas", budget_chars=9500, query="garden hose", sections=["matches"])
+        path, auth = seen[-1]
+        assert path.startswith("/hub/v1/projects/atlas/context?") and "sections=matches" in path and auth == "Bearer synthetic-test-token"
+        assert result["event_ids"] == ["e"]
+        hook = prompt_context(cfg, {"session_id": "loop-1", "cwd": str(tmp_path / "work"), "prompt": "garden hose"})
+        assert "3+1" in hook["hookSpecificOutput"]["additionalContext"]
+        with pytest.raises(ServiceError) as denied:
+            LoopbackClient(cfg, timeout=2).request("GET", "v1/projects/harbor/context")
+        assert denied.value.status == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+    # Nothing listens now: the hook adds nothing rather than failing the prompt.
+    assert prompt_context(cfg, {"session_id": "loop-2", "cwd": str(tmp_path / "work"), "prompt": "garden hose"}) == {}
+    cfg.url = "https://memory.example.com"
+    assert not isinstance(hook_client(cfg, timeout=2), LoopbackClient)

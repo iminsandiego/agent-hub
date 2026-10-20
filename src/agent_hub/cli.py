@@ -19,7 +19,7 @@ from .adapters import AdapterError, parse_jsonl
 from .client import (
     ClientConfig, ClientError, LocalState, MemoryClient, atomic_write,
     bounded_context, create_gateway, default_config_path, discover_paths, drain_queue,
-    enqueue_hook, hook_context, ingest_codex_thread, ingest_file,
+    enqueue_hook, hook_context, ingest_codex_thread, ingest_file, prompt_context,
 )
 
 
@@ -291,6 +291,8 @@ def hook(args: argparse.Namespace) -> int:
             enqueue_hook(config, payload, args.client)
         if name == "SessionStart":
             print(json.dumps(hook_context(config, payload), ensure_ascii=False))
+        if name == "UserPromptSubmit":
+            print(json.dumps(prompt_context(config, payload), ensure_ascii=False))
     except Exception as exc:
         message = str(exc) if isinstance(exc, (ClientError, AdapterError)) else type(exc).__name__
         print("Agent Hub hook: " + message, file=sys.stderr)

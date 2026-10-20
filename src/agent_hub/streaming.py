@@ -92,7 +92,7 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
                 prefix_checked = True
             for batch in _batches(pending):
                 receipt = {"inserted": 0, "duplicates": 0} if suppressed else connection.ingest(target, base_transcript, batch)
-                suppressed |= bool(receipt.get("suppressed"))
+                suppressed |= bool(receipt.get("suppressed") or receipt.get("excluded"))
                 inserted += int(receipt.get("inserted", 0)); duplicates += int(receipt.get("duplicates", 0))
                 end = batch[-1]["_end_offset"] - base
                 digest.update(data[hashed:end]); hashed = end; offset = base + end
