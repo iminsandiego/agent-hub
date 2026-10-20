@@ -29,7 +29,7 @@ def chunks(source: Path, size: int, budget: int = 512_000):
 
 
 def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
-                      session_id=None, final=False, memory=None, state=None):
+                      session_id=None, final=False, memory=None, state=None, adapter_version=1):
     from .client import ClientError, LocalState, MemoryClient, _batches, file_key
     state = state or LocalState(config)
     stat = source.stat()
@@ -47,7 +47,7 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
         part = parse_jsonl(data, client=client if base_transcript is None else base_transcript.client,
                            machine=config.machine_id, path=str(source), session_id=identity,
                            cwd=cwd if base_transcript is None else base_transcript.cwd,
-                           final=final, start_line=ordinal)
+                           final=final, start_line=ordinal, adapter_version=adapter_version)
         if base_transcript is None:
             base_transcript = part
             target = config.resolve_project(part.cwd, project)
@@ -80,7 +80,7 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
         for base, ordinal, data in chunks(source, stat.st_size):
             part = parse_jsonl(data, client=base_transcript.client, machine=config.machine_id,
                                path=str(source), session_id=identity, cwd=base_transcript.cwd,
-                               final=final, start_line=ordinal)
+                               final=final, start_line=ordinal, adapter_version=adapter_version)
             hashed = 0
             for e in part.events:
                 e["_end_offset"] += base
@@ -96,9 +96,11 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
                 inserted += int(receipt.get("inserted", 0)); duplicates += int(receipt.get("duplicates", 0))
                 end = batch[-1]["_end_offset"] - base
                 digest.update(data[hashed:end]); hashed = end; offset = base + end
-                state.save_checkpoint_hash(key, digest.hexdigest(), offset, base_transcript.session_id, target, stat)
+                state.save_checkpoint_hash(key, digest.hexdigest(), offset, base_transcript.session_id, target, stat,
+                                           adapter_version=adapter_version)
             digest.update(data[hashed:part.complete_bytes])
-        state.save_checkpoint_hash(key, digest.hexdigest(), complete_bytes, base_transcript.session_id, target, stat)
+        state.save_checkpoint_hash(key, digest.hexdigest(), complete_bytes, base_transcript.session_id, target, stat,
+                                   adapter_version=adapter_version)
         from .codex_titles import index_title
         index_title(config, source, base_transcript, connection, project=target)
     finally:

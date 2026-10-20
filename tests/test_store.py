@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
@@ -214,7 +215,7 @@ def test_context_budget_includes_headers_and_embedded_text(store):
             assert context["truncated"]
     context = store.context("alpha")
     assert context["text"].startswith("HISTORICAL UNTRUSTED DATA")
-    assert context["text"].index("Current reviewed note") < context["text"].index("historical_tree_excerpt")
+    assert context["text"].index("Current reviewed note") < context["text"].index("## History")
 
 
 def test_context_explicitly_marks_truncated_active_statements(store):
@@ -222,7 +223,7 @@ def test_context_explicitly_marks_truncated_active_statements(store):
     store.review_memory("alpha", note["id"], "active", actor="owner-admin")
     context = store.context("alpha")
     assert context["truncated"]
-    assert '"statement_truncated":true' in context["text"]
+    assert "[statement truncated]" in context["text"]
     assert store.get_memory("alpha", note["id"])["reviews"][0]["actor"] == "owner-admin"
 
 
@@ -332,3 +333,124 @@ def test_session_list_previews_the_first_typed_request_and_source_span(store):
     assert sessions["tool-only"]["preview"] == "Tool output only"
     assert sessions["tool-only"]["first_timestamp"] is None
     assert len(store.list_sessions("alpha")[0]["preview"]) <= 240
+
+
+@pytest.mark.parametrize("budget", [8000, 24000, 64000])
+def test_context_history_covers_every_event_once_with_recent_detail(store, budget):
+    for batch in range(10):
+        ingest(store, [event(i, f"Event {batch * 100 + i} " + "word " * 60) for i in range(100)], session=f"s{batch}")
+    pack = store.context("alpha", budget)
+    nodes = history_spans(pack["text"])
+    assert nodes[0][0] == 0 and nodes[-1][1] == 999
+    assert all(a[1] + 1 == b[0] for a, b in zip(nodes, nodes[1:]))
+    assert nodes[-1] == (999, 999)  # the newest event is shown on its own
+    assert pack["char_count"] <= budget and not pack["truncated"]
+
+
+def test_context_keeps_the_newest_history_when_even_the_roots_do_not_fit(store):
+    for batch in range(10):
+        ingest(store, [event(i, f"Event {batch * 100 + i} " + "word " * 60) for i in range(100)], session=f"s{batch}")
+    pack = store.context("alpha", 2000)
+    nodes = history_spans(pack["text"])
+    assert pack["truncated"] and pack["char_count"] <= 2000
+    assert max(hi for _, hi in nodes) == 999
+
+
+def test_context_respects_the_result_byte_guard_for_multibyte_text(store):
+    for batch in range(4):
+        ingest(store, [event(i, "記録" * 800) for i in range(64)], session=f"cjk{batch}")
+    for index in range(60):
+        note = store.add_memory("alpha", f"{index}決定" + "決定" * 690, "decision", [])
+        store.review_memory("alpha", note["id"], "active")
+    pack = store.context("alpha", 64000)
+    assert len(pack["active_memory_ids"]) > 10
+    assert 120_000 < len(pack["text"].encode("utf-8")) <= 140_000
+
+
+def test_zoom_accepts_lo_plus_n_references_and_explains_bad_ones(store):
+    ingest(store, [event(i, f"Record {i} " + "word " * 120) for i in range(12)])
+    whole = store.zoom("alpha", "0+8")
+    assert (whole["node"]["lo"], whole["node"]["hi"]) == (0, 7) and whole["node"]["ref"] == "0+8"
+    assert [child["ref"] for child in whole["children"]] == ["0+4", "4+4"]
+    leaf = store.zoom("alpha", "9+1")
+    assert leaf["event"]["sequence"] == 9 and leaf["node"]["ref"] == "9+1"
+    for bad in ("3+2", "0+3", "8+8", "12+1"):
+        with pytest.raises(ValueError, match="top nodes: 0\\+8, 8\\+4"):
+            store.zoom("alpha", bad)
+    hit = [h for h in store.search("alpha", "Record") if h["type"] == "event"][0]
+    assert store.zoom("alpha", hit["ref"])["event"]["id"] == hit["id"]
+
+
+def history_spans(text):
+    """(lo, hi) of each history line in a context pack."""
+    history = text.split("## History", 1)[1] if "## History" in text else ""
+    spans = []
+    for line in history.splitlines()[1:]:
+        match = re.match(r"^(\d+)\+(\d+) \| ", line)
+        if match:
+            spans.append((int(match[1]), int(match[1]) + int(match[2]) - 1))
+    return sorted(spans)
+
+
+def test_context_lines_carry_dates_and_read_oldest_first(store):
+    ingest(store, [event(i, f"Record {i}", timestamp=f"2026-0{1 + i // 4}-0{1 + i % 4}T09:30:00Z") for i in range(8)])
+    text = store.context("alpha", 64000)["text"]
+    history = text.split("## History", 1)[1].splitlines()[1:]
+    assert history[0].startswith("0+1 | 2026-01-01 09:30 | user: Record 0")
+    assert history[-1].startswith("7+1 | 2026-02-04 09:30 | user: Record 7")
+    from agent_hub.store import CONTEXT_HEADER, HISTORY_TITLE
+    coarse = store.context("alpha", len(CONTEXT_HEADER) + len(HISTORY_TITLE) + 200)["text"]
+    assert "0+4 | 2026-01-01..2026-01-04 | user: Record 0 ¶ user: Record 1" in coarse
+
+
+def test_query_matches_leave_room_for_history(store):
+    ingest(store, [event(i, f"Shared term record {i} " + "word " * 80) for i in range(64)])
+    pack = store.context("alpha", 6000, "Shared term")
+    assert "## Records matching the task" in pack["text"] and "## History" in pack["text"]
+    spans = history_spans(pack["text"])
+    assert spans[0][0] == 0 and spans[-1][1] == 63
+
+
+def test_reorder_puts_a_backfilled_session_in_time_order(store):
+    newer = ingest(store, [event(i, f"October work {i}", timestamp=f"2026-10-0{i + 1}T10:00:00Z") for i in range(4)], session="newer")
+    older = ingest(store, [
+        event(0, "Old question", timestamp="2024-03-01T09:00:00Z"),
+        event(1, "Old answer, no timestamp", timestamp=None),
+        event(2, "Old follow-up with a clock that went backwards", timestamp="2024-02-28T09:00:00Z"),
+    ], session="older")
+    note = store.add_memory("alpha", "Old decision", "decision", [older["event_ids"][0]])
+    plan = store.reorder_by_time("alpha")
+    assert plan == {**plan, "applied": False, "events": 7, "moved": 7}
+    assert store.get_event("alpha", older["event_ids"][0])["sequence"] == 4  # nothing written yet
+    done = store.reorder_by_time("alpha", apply=True)
+    assert done["applied"] and done["positions"] == {"before": 7, "after": 7}
+    order = [store.get_event("alpha", identifier)["text"] for identifier in sorted(
+        older["event_ids"] + newer["event_ids"], key=lambda i: store.get_event("alpha", i)["sequence"])]
+    assert order[:3] == ["Old question", "Old answer, no timestamp", "Old follow-up with a clock that went backwards"]
+    assert order[3:] == [f"October work {i}" for i in range(4)]
+    assert store.get_memory("alpha", note["id"])["source_event_ids"] == [older["event_ids"][0]]
+    assert store.search("alpha", "Old question")[0]["sequence"] == 0
+    assert history_spans(store.context("alpha", 64000)["text"]) == [(i, i) for i in range(7)]
+    later = ingest(store, [event(9, "Live record after the reorder")], session="newer")
+    assert store.get_event("alpha", later["event_ids"][0])["sequence"] == 7
+
+
+def test_reorder_interleaves_concurrent_sessions_and_drops_forgotten_gaps(store):
+    ingest(store, [event(i, f"A{i}", timestamp=f"2026-10-01T10:0{2 * i}:00Z") for i in range(3)], session="a")
+    gone = ingest(store, [event(0, "temporary chat", timestamp="2026-10-01T09:00:00Z")], session="gone")
+    ingest(store, [event(i, f"B{i}", timestamp=f"2026-10-01T10:0{2 * i + 1}:00Z") for i in range(3)], session="b")
+    store.set_session_privacy("alpha", gone["session_id"], "forgotten")
+    assert store.stats("alpha")["events"] == 6
+    store.reorder_by_time("alpha", apply=True)
+    texts = [hit["excerpt"] for hit in sorted((h for q in ("A0", "A1", "A2", "B0", "B1", "B2") for h in store.search("alpha", q)),
+                                               key=lambda h: h["sequence"])]
+    assert texts == ["A0", "B0", "A1", "B1", "A2", "B2"]
+    assert max(node["hi"] for node in store.view("alpha", max_nodes=1)) == 5  # six positions, no gap marker left
+
+
+def test_a_moved_transcript_is_the_same_session_but_a_parser_change_is_not(store):
+    store.ingest("alpha", "codex", "m", "s", [event(0)], {"adapter_version": 1, "source_path": "/sessions/a.jsonl"})
+    moved = store.ingest("alpha", "codex", "m", "s", [event(0)], {"adapter_version": 1, "source_path": "/archived_sessions/a.jsonl"})
+    assert moved["duplicates"] == 1
+    with pytest.raises(ValueError, match="metadata"):
+        store.ingest("alpha", "codex", "m", "s", [event(0)], {"adapter_version": 2, "source_path": "/sessions/a.jsonl"})

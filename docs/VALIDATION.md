@@ -1,3 +1,19 @@
+## 0.1.9 fixes from the UniiChat comparison, October 19, 2026
+
+UniiChat source (github.com/VictorTaelin/UniiChat, commit 0500bf6) was read as data; none of its code was run. Each Agent Hub bug below was reproduced with a synthetic test that fails on 0.1.8 and passes now:
+
+- 8,000-character context for 1,000 records covered records 985–999 only; it now covers 0–999 with no gaps (`tests/test_store.py`).
+- A context with 60 active multi-byte notes measured 168,089 bytes on 0.1.8, over the 160,000-byte result guard; now at most 140,000.
+- A summary answer always over 512 bytes made every run spend calls on one node and summarize nothing; an oversized record kept the root extractive; fenced extraction JSON stalled extraction (`tests/test_worker.py`).
+- A queued `[temp]` Claude prompt did not exclude the chat (`tests/test_privacy.py`).
+- Upload jobs and discovered files did not run oldest first (`tests/test_clients.py`).
+
+New in the same release, each with synthetic tests: time reorder (backfilled session moved first, per-session order kept with missing and backwards timestamps, IDs/notes/search unchanged, forgotten gaps closed, worker checkpoints translated, refused while a worker run holds the lock); dated one-line context (oldest first, hostile multi-line text confined to its own line, query matches capped at half the budget); `lo+n` zoom through the store and REST route; merges receiving their own records as span detail and retries showing the 512-byte cut; parser version 2 roles and payloads for Codex and Claude Code with version 1 output unchanged, version kept per file, and a lost checkpoint falling back to version 1 with all records matching as duplicates; and forgetting resetting only model summaries that could have seen the chat.
+
+Linux, CPython 3.13.16: `PYTHONPATH=src python -m pytest -q` ran 340 tests, 339 passed. The one failure, `test_client_against_real_authenticated_service_contract`, is the environment-specific httpx mock-transport failure also recorded in the two entries below. `scripts/browser-smoke.cjs` passed its 27 checks against the synthetic fixture. The deployed home VM was not exercised.
+
+---
+
 ## 0.1.8 browser password sign-in, October 12, 2026
 
 Linux, CPython 3.13.16: `PYTHONPATH=src python -m pytest -q` ran 309 tests, 308

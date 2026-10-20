@@ -216,3 +216,39 @@ def test_restore_closes_all_sqlite_connections_explicitly(initialized, tmp_path,
     finally:
         for connection in opened:
             connection.close()
+
+
+def test_reorder_command_translates_worker_progress_and_respects_the_worker_lock(initialized, capsys):
+    from agent_hub import worker
+    store = Store(initialized.database)
+    store.create_project("alpha")
+    def batch(session, texts, year):
+        return store.ingest("alpha", "codex", "m", session, [
+            {"event_id": str(i), "role": "user", "text": text, "raw": "{}", "timestamp": f"{year}-01-0{i + 1}T00:00:00Z"}
+            for i, text in enumerate(texts)])
+    batch("newer", ["n0", "n1", "n2"], 2026)
+    older = batch("older", ["o0", "o1"], 2024)
+    ledger = worker._connection(initialized)
+    ledger.execute("INSERT INTO checkpoints VALUES('alpha','heuristic-v1',4)")      # everything processed
+    ledger.execute("INSERT INTO checkpoints VALUES('alpha','llm-extract-v1',2)")    # newer session only
+    ledger.execute("INSERT INTO blocked VALUES('alpha','extract',?,4,'too large','now')", (older["event_ids"][1],))
+    ledger.execute("INSERT INTO blocked VALUES('alpha','summary','n_old_node',NULL,'too large','now')")
+    ledger.commit()
+    capsys.readouterr()
+    run_admin("reorder", "--data-dir", str(initialized.data_dir), "--project", "alpha")
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["applied"] is False and plan["moved"] == 5
+    lock = sqlite3.connect(initialized.data_dir / "worker-lock-alpha.sqlite3", timeout=0)
+    lock.execute("BEGIN IMMEDIATE")
+    with pytest.raises(ValueError, match="worker run holds"):
+        run_admin("reorder", "--data-dir", str(initialized.data_dir), "--project", "alpha", "--apply")
+    lock.rollback()
+    lock.close()
+    run_admin("reorder", "--data-dir", str(initialized.data_dir), "--project", "alpha", "--apply")
+    done = json.loads(capsys.readouterr().out)
+    assert done["applied"] and "sequence_map" not in done
+    # The older session now comes first; the LLM stage resumes before it (o0, o1 unprocessed).
+    assert done["worker_checkpoints"] == {"heuristic-v1": 4, "llm-extract-v1": -1}
+    assert ledger.execute("SELECT sequence FROM blocked WHERE stage='extract'").fetchone()[0] == 1
+    assert ledger.execute("SELECT count(*) FROM blocked WHERE stage='summary'").fetchone()[0] == 0
+    ledger.close()

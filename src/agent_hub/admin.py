@@ -160,6 +160,48 @@ def restore(args):
         raise
 
 
+def reorder(args):
+    """Put a project's records in source-time order (see Store.reorder_by_time)."""
+    settings = settings_for(args)
+    store = Store(settings.database)
+    if not args.apply:
+        plan = store.reorder_by_time(args.project)
+        output({**plan, "next": "Back up first (agent-hub backup), then run again with --apply."})
+        return
+    import sqlite3
+    from .worker import _connection as worker_ledger
+    lock = sqlite3.connect(settings.data_dir / ("worker-lock-" + args.project + ".sqlite3"), timeout=0)
+    try:
+        try:
+            lock.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            raise ValueError("A worker run holds this project's lock; retry when it finishes") from None
+        result = store.reorder_by_time(args.project, apply=True)
+        mapping = result.pop("sequence_map")
+        ledger = worker_ledger(settings)
+        try:
+            cursors = {}
+            for stage, cursor in ledger.execute("SELECT stage,sequence FROM checkpoints WHERE project=?", (args.project,)).fetchall():
+                # Resume just before the first record this stage had not reached; records
+                # after it that were already processed are revisited idempotently.
+                pending = [new for old, new in mapping.items() if old > cursor]
+                cursors[stage] = (min(pending) - 1) if pending else len(mapping) - 1
+                ledger.execute("UPDATE checkpoints SET sequence=? WHERE project=? AND stage=?", (cursors[stage], args.project, stage))
+            for item, old in ledger.execute("SELECT item,sequence FROM blocked WHERE project=? AND stage='extract'", (args.project,)).fetchall():
+                if old in mapping:
+                    ledger.execute("UPDATE blocked SET sequence=? WHERE project=? AND stage='extract' AND item=?", (mapping[old], args.project, item))
+            # Tree positions now name different records: rediscover summary blocks.
+            cleared = ledger.execute("DELETE FROM blocked WHERE project=? AND stage='summary'", (args.project,)).rowcount
+            ledger.execute("DELETE FROM rejections WHERE project=? AND stage='summary'", (args.project,))
+            ledger.commit()
+        finally:
+            ledger.close()
+        output({**result, "worker_checkpoints": cursors, "summary_blocks_cleared": cleared})
+    finally:
+        lock.rollback()
+        lock.close()
+
+
 def rebuild(args):
     output(Store(settings_for(args).database).rebuild_tree(args.project))
 
@@ -259,6 +301,11 @@ def register_commands(subparsers):
     restore_parser.add_argument("--source", required=True)
     restore_parser.add_argument("--privacy-ledger", help="Required current exclusion ledger; prevents restoration of forgotten chats")
     restore_parser.set_defaults(func=restore)
+    reorder_parser = subparsers.add_parser("reorder", help="Renumber a project's records in source-time order and rebuild its tree")
+    common(reorder_parser)
+    reorder_parser.add_argument("--project", required=True)
+    reorder_parser.add_argument("--apply", action="store_true", help="Write the new order (default: report what would change)")
+    reorder_parser.set_defaults(func=reorder)
     rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild lossy summary cache from original records")
     common(rebuild_parser)
     rebuild_parser.add_argument("--project", required=True)

@@ -40,8 +40,23 @@ def clip_utf8(text: str, limit: int, *, marker: str = "…") -> str:
     return encoded[: limit - len(suffix)].decode("utf-8", errors="ignore") + marker
 
 
+def clip_utf8_tail(text: str, limit: int, *, marker: str = "…") -> str:
+    """Return valid UTF-8 of at most ``limit`` bytes from the end, with a loss marker."""
+    if limit <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    prefix = marker.encode("utf-8")
+    if len(prefix) > limit:
+        return encoded[-limit:].decode("utf-8", errors="ignore")
+    return marker + encoded[len(encoded) - (limit - len(prefix)):].decode("utf-8", errors="ignore")
+
+
 def compact_excerpts(parts: Iterable[str], limit: int = SUMMARY_BYTES) -> str:
-    """Copy bounded excerpts from both ends rather than silently favoring one.
+    """Copy bounded excerpts from both ends rather than silently favoring one:
+    the start of the first part and the end of the last (of a single long part,
+    its start and its end), so a range shows its earliest and latest material.
 
     The ellipses and separator are presentation, not generated source text.
     This function is intentionally deterministic and contains no model calls.
@@ -52,7 +67,7 @@ def compact_excerpts(parts: Iterable[str], limit: int = SUMMARY_BYTES) -> str:
     joined = "\n\n".join(values)
     if len(joined.encode("utf-8")) <= limit:
         return joined
-    if len(values) == 1 or limit < 16:
+    if limit < 16:
         return clip_utf8(joined, limit)
     separator = "\n[…]\n"
     remaining = max(0, limit - len(separator.encode("utf-8")))
@@ -61,7 +76,7 @@ def compact_excerpts(parts: Iterable[str], limit: int = SUMMARY_BYTES) -> str:
     return (
         clip_utf8(values[0], left_budget)
         + separator
-        + clip_utf8(values[-1], right_budget)
+        + clip_utf8_tail(values[-1], right_budget)
     )
 
 

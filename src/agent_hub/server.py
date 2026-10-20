@@ -234,7 +234,12 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @mcp.tool(annotations=readonly)
     async def memory_zoom(project: str, node_id: str) -> dict:
-        """Expand a tree node to its children, or a leaf to the captured original record."""
+        """Expand a history span into its two halves, or one record into its captured original.
+
+        node_id is a span reference "lo+n" (n records from position lo; n a power of
+        two, lo a multiple of n), e.g. "1024+512", or "37+1" for record 37. Search
+        hits and context lines carry these references; a node id also works.
+        """
         authorize(project)
         if len(node_id) > 256:
             raise ValueError("Invalid node identifier")

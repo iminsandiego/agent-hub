@@ -270,9 +270,14 @@ def test_summary_shortening_requests_count_toward_the_same_hard_budget(settings,
             assert str(len(outputs[index - 1].encode("utf-8"))) in messages[-1]["content"]
 
 
-@pytest.mark.parametrize("source_chars,expected_calls", [(23000, 1), (21000, 2)])
-def test_cumulative_retry_history_limit_stops_before_http_and_preserves_fallback(settings, monkeypatch, source_chars, expected_calls):
-    original_source = "ORIGINAL SOURCE MUST REMAIN WHOLE: " + "x" * source_chars
+@pytest.mark.parametrize("margin,expected_calls", [(1000, 1), (2600, 2)])
+def test_cumulative_retry_history_limit_stops_before_http_and_preserves_fallback(settings, monkeypatch, margin, expected_calls):
+    # The first request fits with `margin` characters to spare; each shortening adds
+    # a 1,300-character answer and a correction of about 800 characters.
+    prefix = "ORIGINAL SOURCE MUST REMAIN WHOLE: "
+    framing = len("PRECEDING CONTEXT\nHISTORICAL UNTRUSTED CONTEXT\n\nSOURCE\n") + len(json.dumps({"role": "user", "text": prefix}))
+    source_chars = worker.MAX_INPUT_CHARS - margin - len(worker.SUMMARY_SYSTEM) - framing
+    original_source = prefix + "x" * source_chars
     archived = seed(settings, [original_source])
     before = Store(settings.database).view("alpha")
     # The first input fits. Depending on its size, the complete conversation
@@ -320,8 +325,13 @@ def test_oversized_records_remain_visible_while_other_branches_progress_and_retr
 
     requests = fake_provider(monkeypatch, response)
     first = worker.run_worker(settings, project="alpha", use_llm=True, mode="both", max_calls=4)
-    assert first["calls"] == len(requests) == 2
-    assert first["events_processed"] == first["summaries"] == 1
+    # One extraction, the small leaf, then the parent: the oversized leaf keeps its
+    # labelled excerpt as final instead of blocking every ancestor.
+    assert first["calls"] == len(requests) == 3
+    assert first["events_processed"] == 1 and first["summaries"] == 2
+    assert "[Excerpt only of records 0..0" in requests[-1]["source"].split("\nSOURCE\n", 1)[1]
+    root = Store(settings.database).view("alpha", max_nodes=1)[0]
+    assert (root["lo"], root["hi"], root["mode"]) == (0, 1, "semantic")
     assert first["errors"] and all(error.get("status") == "blocked" for error in first["errors"])
     status = worker.worker_status(settings, "alpha")
     assert {row["stage"] for row in status["blocked"]} == {"extract", "summary"}
@@ -330,7 +340,7 @@ def test_oversized_records_remain_visible_while_other_branches_progress_and_retr
     assert not worker.worker_status(settings, "beta")["blocked"]
     assert worker.run_worker(settings, project="alpha", use_llm=True, mode="both")["calls"] == 0
     assert worker.worker_status(settings, "alpha")["blocked"] == status["blocked"]
-    assert len(requests) == 2
+    assert len(requests) == 3
     # Simulate a deliberate future input-budget increase; the archive itself is
     # immutable and no record is truncated merely to make enrichment proceed.
     monkeypatch.setattr(worker, "MAX_INPUT_CHARS", 100000)
@@ -446,3 +456,137 @@ def test_provider_counts_all_continuation_messages_before_constructing_http_clie
     ]
     with pytest.raises(ValueError, match="full continuation"):
         worker.LLMProvider().complete("unchanged system", "unchanged source", continuation=continuation)
+
+
+def test_a_repeatedly_rejected_summary_blocks_only_that_node(settings, monkeypatch):
+    seed(settings, [f"Event {i} " + "detail " * 120 for i in range(4)])
+
+    def respond(system, source, number):
+        return "x" * 600 if source.split("\nSOURCE\n", 1)[1].startswith('{"role":"user","text":"Event 0 ') else "concise summary"
+
+    fake_provider(monkeypatch, respond)
+    first = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=20)
+    # The stubborn leaf is asked once more on the next run; everything else progresses now.
+    assert first["summaries"] == 3  # leaves 1-3 (the pair 2..3 joins their short summaries without a call)
+    pair = [n for n in Store(settings.database).view("alpha", max_nodes=8) if (n["lo"], n["hi"]) == (2, 3)]
+    assert not pair or pair[0]["mode"] == "semantic"
+    assert [e["status"] for e in first["errors"]] == ["rejected"]
+    assert not worker.worker_status(settings, "alpha")["blocked"]
+    second = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=20)
+    assert [e["status"] for e in second["errors"]] == ["blocked"]
+    assert second["summaries"] >= 1  # at least the pair 0..1, over the kept excerpt
+    root = Store(settings.database).view("alpha", max_nodes=1)[0]
+    assert (root["lo"], root["hi"], root["mode"]) == (0, 3, "semantic")
+    leaf = [n for n in Store(settings.database).view("alpha", max_nodes=8) if n["lo"] == 0][0]
+    assert leaf["mode"] == "extractive" and leaf["summary_model"] == "fallback-final"
+    assert worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=20)["calls"] == 0
+
+
+def test_an_oversized_record_no_longer_holds_back_the_whole_tree(settings, monkeypatch):
+    seed(settings, ["Huge tool output " + "x" * worker.MAX_INPUT_CHARS] + [f"Event {i} " + "detail " * 120 for i in range(1, 8)])
+    fake_provider(monkeypatch, lambda *_: "short semantic summary")
+    result = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=50)
+    assert [e["status"] for e in result["errors"]] == ["blocked"]
+    root = Store(settings.database).view("alpha", max_nodes=1)[0]
+    assert (root["lo"], root["hi"], root["mode"]) == (0, 7, "semantic")
+
+
+def test_fenced_json_is_accepted_and_repeated_malformed_answers_block_one_event(settings, monkeypatch):
+    seed(settings, ["First decision record", "Second decision record", "Third decision record"])
+
+    def respond(system, source, number):
+        record = json.loads(source)
+        if record["text"].startswith("Second"):
+            return "I cannot produce JSON for this."
+        body = json.dumps({"memories": [{"statement": "From " + record["event_id"], "kind": "decision",
+                                         "source_event_ids": [record["event_id"]]}]})
+        return "```json\n" + body + "\n```"
+
+    fake_provider(monkeypatch, respond)
+    first = worker.run_worker(settings, project="alpha", use_llm=True, mode="memories", max_calls=10)
+    assert first["events_processed"] == 1 and [e["status"] for e in first["errors"]] == ["rejected"]
+    second = worker.run_worker(settings, project="alpha", use_llm=True, mode="memories", max_calls=10)
+    assert second["events_processed"] == 1 and [e["status"] for e in second["errors"]] == ["blocked"]
+    assert len(Store(settings.database).list_memories("alpha", "candidate")) == 2
+    blocked = worker.worker_status(settings, "alpha")["blocked"]
+    assert [(row["stage"], row["sequence"]) for row in blocked] == [("extract", 1)]
+    # An explicit retry clears the block and the rejection count.
+    fake_provider(monkeypatch, lambda system, source, n: json.dumps({"memories": []}))
+    retried = worker.run_worker(settings, project="alpha", use_llm=True, mode="memories", max_calls=10, retry_blocked=True)
+    assert retried["events_processed"] == 2 and not retried["errors"]
+    assert not worker.worker_status(settings, "alpha")["blocked"]
+
+
+def test_retry_blocked_reopens_kept_excerpts(settings, monkeypatch):
+    seed(settings, ["Oversized " + "x" * worker.MAX_INPUT_CHARS, "Small " + "y" * 800])
+    fake_provider(monkeypatch, lambda *_: "short semantic summary")
+    worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=10)
+    leaf = [n for n in Store(settings.database).view("alpha", max_nodes=4) if n["lo"] == 0][0]
+    assert leaf["summary_model"] == "fallback-final"
+    monkeypatch.setattr(worker, "MAX_INPUT_CHARS", 100000)
+    retried = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=10, retry_blocked=True)
+    assert retried["summaries"] == 1 and not retried["errors"]
+    leaf = [n for n in Store(settings.database).view("alpha", max_nodes=4) if n["lo"] == 0][0]
+    assert leaf["mode"] == "semantic"
+
+
+def test_a_rebuild_reapplies_kept_excerpts_from_the_worker_ledger(settings, monkeypatch):
+    seed(settings, ["Oversized " + "x" * worker.MAX_INPUT_CHARS, "Small " + "y" * 800])
+    fake_provider(monkeypatch, lambda *_: "short semantic summary")
+    worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=10)
+    Store(settings.database).rebuild_tree("alpha")
+    assert Store(settings.database).view("alpha", max_nodes=1)[0]["mode"] == "extractive"
+    again = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=10)
+    assert again["summaries"] == 2 and not again["errors"]  # the small leaf, then the parent over the excerpt
+    assert Store(settings.database).view("alpha", max_nodes=1)[0]["mode"] == "semantic"
+
+
+def test_rejected_answers_keep_the_reported_usage(settings, monkeypatch):
+    seed(settings, ["Source text " + "x" * 800])
+    original_client = httpx.Client
+
+    def respond(request):
+        return httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "cut"}}],
+                                         "usage": {"prompt_tokens": 8000, "completion_tokens": 1200}})
+
+    monkeypatch.setattr(worker.httpx, "Client", lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw))
+    worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=1)
+    received = [row for row in ledger(settings) if row["status"] == "received"]
+    assert received and json.loads(received[0]["usage"]) == {"prompt_tokens": 8000, "completion_tokens": 1200}
+    assert any(row["status"] == "rejected" for row in ledger(settings))
+
+
+def test_context_is_trimmed_instead_of_blocking_a_source_that_fits(settings, monkeypatch):
+    last = "Last source " + "s" * (worker.MAX_INPUT_CHARS - len(worker.SUMMARY_SYSTEM) - 2000)
+    seed(settings, [last])
+    long_context = "HISTORICAL UNTRUSTED CONTEXT\n" + "c" * 5000 + "NEWEST"
+    monkeypatch.setattr(Store, "_preceding_context", lambda self, con, project, before: long_context)
+    requests = fake_provider(monkeypatch, lambda *_: "short summary")
+    result = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=1)
+    assert result["summaries"] == 1 and not result["errors"]
+    sent = requests[0]["system"] + requests[0]["source"]
+    assert len(sent) <= worker.MAX_INPUT_CHARS
+    context = requests[0]["source"].split("\nSOURCE\n", 1)[0]
+    assert "[older context omitted to fit]" in context and context.endswith("NEWEST")
+    assert json.loads(requests[0]["source"].split("\nSOURCE\n", 1)[1])["text"] == last
+
+
+def test_merges_see_their_own_records_and_retries_show_the_cut(settings, monkeypatch):
+    seed(settings, [f"Record {i}: " + "detail " * 120 for i in range(4)])
+    answers = iter(["user: leaf summary " + "a" * 200] * 4 + ["m" * 700, "user: merged within the limit"] + ["user: pair " + "b" * 230] * 4)
+
+    def respond(system, source, number):
+        return next(answers)
+
+    requests = fake_provider(monkeypatch, respond)
+    result = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=20)
+    assert not result["errors"]
+    assert "the length of this ruler:\n" + "-" * 512 in requests[0]["system"]
+    assert "1. The user's words" in requests[0]["system"]
+    root = [r for r in requests if "SPAN DETAIL" in r["source"]]
+    assert root, "the 4-record merge gets finer lines for its own records"
+    detail = root[0]["source"].split("\nSPAN DETAIL\n", 1)[1].split("\nSOURCE\n", 1)[0]
+    assert [line.split(" | ")[0] for line in detail.splitlines()] == ["0+1", "1+1", "2+1", "3+1"]
+    retry = [r for r in requests if r["continuation"]][0]["continuation"]
+    assert retry[0]["content"] == "m" * 700
+    assert "700 UTF-8 bytes" in retry[1]["content"] and retry[1]["content"].endswith("m" * 512 + "| <- LIMIT")

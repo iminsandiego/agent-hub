@@ -1,6 +1,7 @@
 """Content-free exclusions, kept separately so archive restores cannot undo them."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -9,10 +10,36 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+_MARKER = re.compile(r"^\s*\[(?:temp|temporary)\](?:\s|$)", re.I)
+
+
 def temporary_message(events: list[dict]) -> bool:
-    return any(e.get("role") == "user" and isinstance(e.get("text"), str)
-               and re.match(r"^\s*\[(?:temp|temporary)\](?:\s|$)", e["text"], re.I)
+    return any((e.get("role") == "user" and isinstance(e.get("text"), str) and _MARKER.match(e["text"]))
+               or _queued_prompt_marked(e.get("raw"))
                for e in events)
+
+
+def _queued_prompt_marked(raw) -> bool:
+    """The user's own words recorded under a non-user role: a prompt typed while
+    Claude Code is busy (a queued-command attachment), or Codex's event copy of
+    a user message (stored as a system record by capture version 2)."""
+    if not isinstance(raw, str) or ("queued_command" not in raw and "user_message" not in raw):
+        return False
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(record, dict):
+        return False
+    attachment = record.get("attachment")
+    if record.get("type") == "attachment" and isinstance(attachment, dict) and attachment.get("type") == "queued_command":
+        prompt = attachment.get("prompt")
+        return isinstance(prompt, str) and bool(_MARKER.match(prompt))
+    payload = record.get("payload")
+    if record.get("type") == "event_msg" and isinstance(payload, dict) and payload.get("type") == "user_message":
+        message = payload.get("message")
+        return isinstance(message, str) and bool(_MARKER.match(message))
+    return False
 
 
 class PrivacyLedger:

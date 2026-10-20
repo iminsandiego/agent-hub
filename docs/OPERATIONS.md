@@ -98,13 +98,25 @@ The current compatible request shape is chat completions with string messages an
 
 Each request has a 45-second HTTP timeout, a 24,000-character bound across all of its message content, including system text, source/context and shortening history, and a requested maximum of 1,200 output tokens. Preceding context is separately capped at 12,000 characters. The 512-byte summary bound is enforced after response. Up to two shortening requests can follow, still within the run's total budget. Each retains the original system/source and every earlier retry message, then appends the prior response and correction. If that full input would exceed the character bound, no further HTTP request is made and the fallback remains available. Failure leaves the existing labelled fallback available. An unchanged retry prefix is not a measured cache hit. Distinct-node context is still recomputed; the worker does not yet implement the corrected Gist's persistent batched cache view or provider-specific cache controls. See [the cache review](CACHE_REVIEW.md). The worker does not call the native client's subscribed model implicitly; API billing and local inference costs are separate from a coding-app subscription.
 
-Inputs too large for the worker are marked blocked with a reason and retained in the archive. Later extraction records and unrelated tree branches can progress; parents of an unprocessed child retain their fallback. Inspect these items with `worker-status`. After a change that can handle them, explicitly use `--retry-blocked`; this clears the project's blocked entries and rewinds extraction to before the earliest blocked event. Identical proposals are deduplicated; a revised extraction can still create different candidates. Changing only the endpoint or model does not raise the current 24,000-character bound, so an unchanged oversized input becomes blocked again.
+Inputs too large for the worker are marked blocked with a reason and retained in the archive, as is an item whose answer was rejected twice (unusable JSON, an incomplete reply, a summary that stayed over 512 bytes). Later extraction records and the rest of the tree progress: a blocked node keeps its labelled excerpt and its ancestors are summarized over it, marked as an excerpt. Inspect these items with `worker-status`. After a change that can handle them, explicitly use `--retry-blocked`; this clears the project's blocked entries and rewinds extraction to before the earliest blocked event. Identical proposals are deduplicated; a revised extraction can still create different candidates. Changing only the endpoint or model does not raise the current 24,000-character bound, so an unchanged oversized input becomes blocked again.
 
 ```bash
 agent-hub worker --data-dir "$HOME/.local/share/agent-hub" --project atlas --llm --once --max-calls 10 --retry-blocked
 ```
 
 Periodic model work should schedule bounded invocations with a chosen frequency and budget. This delivery does not create a schedule or authorize recurring provider spending. Ordinary startup and ingestion do not call a model.
+
+## Put history in time order
+
+Uploads get positions in arrival order, so a large backfill makes old sessions look like the newest history. Put a project back in source-time order with:
+
+```bash
+agent-hub backup --data-dir "$HOME/.local/share/agent-hub" --output "$HOME/agent-hub-before-reorder.sqlite3"
+agent-hub reorder --data-dir "$HOME/.local/share/agent-hub" --project PROJECT          # report only
+agent-hub reorder --data-dir "$HOME/.local/share/agent-hub" --project PROJECT --apply  # write it
+```
+
+Records sort by their source time, carried forward within each session (a record without a time follows the one before it; a session without times uses its capture time), so a session's own order never changes and overlapping sessions interleave. IDs, raw records, notes and search are unchanged. Positions and `lo+n` references change, gaps left by forgotten chats close, and the tree is rebuilt, which resets model-written summaries (the report shows how many). The command holds the worker's lock, moves its extraction checkpoints to just before the first record each stage had not processed (already-processed records after it are revisited; deduplication prevents repeated notes) and clears blocked tree nodes, which are found again without model calls. Capture can keep running; uploads wait for the reorder's write and then append after it. Run it again after any later backfill.
 
 ## Rebuild and upgrades
 

@@ -34,6 +34,13 @@ summaries and avoiding a full archive rebuild. Surviving event IDs and sequence 
 content-free gap markers preserve the tree's navigation. Stale model-worker
 summary/extraction completions are rejected using a privacy revision.
 
+Forgetting also resets any model-written summary that could have copied a detail
+from the chat: the optional model worker summarizes a record with earlier history
+as context, so every summary of a later record that was written while the chat
+was in the archive goes back to its deterministic excerpt and is summarized again
+by a later worker run. Summaries of earlier records, and everything when the
+worker was never enabled, are unaffected. The result reports `summaries_reset`.
+
 A separate private SQLite exclusion ledger stores hashed session identities,
 project, mode and proven relationships, without chat text, titles or prompts.
 The server records policy durably before purging. The ledger survives an archive

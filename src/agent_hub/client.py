@@ -19,7 +19,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
-from .adapters import AdapterError, Transcript, export_codex_thread, parse_jsonl
+from .adapters import ADAPTER_VERSION, AdapterError, Transcript, export_codex_thread, parse_jsonl
 
 
 class ClientError(ValueError):
@@ -27,9 +27,10 @@ class ClientError(ValueError):
 
 
 class ServiceError(ClientError):
-    def __init__(self, status: int):
+    def __init__(self, status: int, detail: str = ""):
         self.status = status
-        super().__init__(f"Memory service returned HTTP {status}.")
+        self.detail = detail
+        super().__init__(f"Memory service returned HTTP {status}." + (f" {detail[:300]}" if detail else ""))
 
 
 def validate_project(value: str) -> str:
@@ -250,7 +251,14 @@ class MemoryClient:
         headers = {"Authorization": "Bearer " + self.config.token()} if auth else {}
         response = self.http.request(method, path.lstrip("/"), headers=headers, **kwargs)
         if not 200 <= response.status_code < 300:
-            raise ServiceError(response.status_code)
+            detail = ""
+            try:
+                body = response.json()
+                value = body.get("detail", body.get("error", "")) if isinstance(body, dict) else ""
+                detail = value if isinstance(value, str) else ""
+            except ValueError:
+                pass
+            raise ServiceError(response.status_code, detail)
         return response.json()
 
     def project_path(self, project: str, suffix: str) -> str:
@@ -323,6 +331,9 @@ class LocalState:
                     id TEXT PRIMARY KEY, text TEXT NOT NULL, captured_at REAL NOT NULL
                 );
             """)
+            # Capture parser version per file; files captured before 0.1.9 stay on version 1.
+            if "adapter_version" not in {row[1] for row in db.execute("PRAGMA table_info(files)")}:
+                db.execute("ALTER TABLE files ADD COLUMN adapter_version INTEGER NOT NULL DEFAULT 1")
             db.execute("DELETE FROM cache")
         if os.name != "nt":
             self.path.chmod(0o600)
@@ -350,7 +361,7 @@ class LocalState:
 
     def due_jobs(self, *, now: float | None = None, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM jobs WHERE next_attempt<=? ORDER BY next_attempt,id LIMIT ?", (time.time() if now is None else now, limit)).fetchall()
+            rows = db.execute("SELECT * FROM jobs WHERE next_attempt<=? ORDER BY next_attempt,rowid LIMIT ?", (time.time() if now is None else now, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def completed(self, job: dict[str, Any]) -> None:
@@ -371,18 +382,21 @@ class LocalState:
             row = db.execute("SELECT * FROM files WHERE id=?", (identifier,)).fetchone()
         return dict(row) if row else None
 
-    def save_checkpoint(self, identifier: str, data: bytes, offset: int, session: str, project: str, stat: os.stat_result) -> None:
-        self.save_checkpoint_hash(identifier, hashlib.sha256(data[:offset]).hexdigest(), offset, session, project, stat, size=len(data))
+    def save_checkpoint(self, identifier: str, data: bytes, offset: int, session: str, project: str, stat: os.stat_result,
+                        *, adapter_version: int = 1) -> None:
+        self.save_checkpoint_hash(identifier, hashlib.sha256(data[:offset]).hexdigest(), offset, session, project, stat,
+                                  size=len(data), adapter_version=adapter_version)
 
     def save_checkpoint_hash(self, identifier: str, prefix_sha: str, offset: int, session: str,
-                             project: str, stat: os.stat_result, *, size: int | None = None) -> None:
+                             project: str, stat: os.stat_result, *, size: int | None = None, adapter_version: int = 1) -> None:
         with self.connect() as db:
-            db.execute("INSERT INTO files VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            db.execute("INSERT INTO files(id,offset,prefix_sha,session_id,project,mtime_ns,size,adapter_version) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                 "offset=excluded.offset,prefix_sha=excluded.prefix_sha,session_id=excluded.session_id,"
-                "project=excluded.project,mtime_ns=excluded.mtime_ns,size=excluded.size "
+                "project=excluded.project,mtime_ns=excluded.mtime_ns,size=excluded.size,adapter_version=excluded.adapter_version "
                 "WHERE excluded.offset>=files.offset", (
                 identifier, offset, prefix_sha, session,
-                project, stat.st_mtime_ns, stat.st_size if size is None else size,
+                project, stat.st_mtime_ns, stat.st_size if size is None else size, adapter_version,
             ))
 
     def status(self) -> dict[str, Any]:
@@ -433,17 +447,40 @@ def ingest_file(
     session_id: str | None = None, final: bool = False,
     memory: MemoryClient | None = None, state: LocalState | None = None,
 ) -> dict[str, Any]:
+    """Capture a transcript with the parser version its session was first captured with.
+
+    A file with a checkpoint keeps its recorded version. A new file uses the current
+    version, unless the server already holds the session under version 1 (a lost
+    checkpoint or a moved file): its metadata then conflicts, and the file is read
+    again with version 1 so archived records match exactly.
+    """
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise ClientError("The queued transcript is unavailable; it remains queued for retry.")
+    state = state or LocalState(config)
+    previous = state.checkpoint(file_key(config, source, client, session_id))
+    version = int(previous.get("adapter_version") or 1) if previous else ADAPTER_VERSION
+    arguments = dict(client=client, project=project, cwd=cwd, session_id=session_id, final=final, memory=memory, state=state)
+    try:
+        return _ingest_file_version(config, source, version, **arguments)
+    except ServiceError as exc:
+        if previous is None and version > 1 and exc.status == 409 and "metadata" in exc.detail.lower():
+            return _ingest_file_version(config, source, 1, **arguments)
+        raise
+
+
+def _ingest_file_version(
+    config: ClientConfig, source: Path, adapter_version: int, *, client: str, project: str | None, cwd: str | None,
+    session_id: str | None, final: bool, memory: MemoryClient | None, state: LocalState,
+) -> dict[str, Any]:
     if source.stat().st_size > 16_000_000:
         from .streaming import ingest_large_file
-        return ingest_large_file(config, source, client=client, project=project, cwd=cwd,
-                                 session_id=session_id, final=final, memory=memory, state=state)
-    state = state or LocalState(config)
+        return ingest_large_file(config, source, client=client, project=project, cwd=cwd, session_id=session_id,
+                                 final=final, memory=memory, state=state, adapter_version=adapter_version)
     data = source.read_bytes()
     stat = source.stat()
-    transcript = parse_jsonl(data, client=client, machine=config.machine_id, path=str(source), session_id=session_id, cwd=cwd, final=final)
+    transcript = parse_jsonl(data, client=client, machine=config.machine_id, path=str(source), session_id=session_id,
+                             cwd=cwd, final=final, adapter_version=adapter_version)
     target = config.resolve_project(transcript.cwd, project)
     config.check_transcript(transcript, target, cwd)
     identifier = file_key(config, source, client, session_id)
@@ -467,11 +504,11 @@ def ingest_file(
             inserted += int(receipt.get("inserted", 0))
             duplicates += int(receipt.get("duplicates", 0))
             offset = batch[-1]["_end_offset"]
-            state.save_checkpoint(identifier, data, offset, transcript.session_id, target, stat)
+            state.save_checkpoint(identifier, data, offset, transcript.session_id, target, stat, adapter_version=adapter_version)
             if receipt.get("suppressed"):
                 break
         # Blank separator lines are safe to checkpoint after all events commit.
-        state.save_checkpoint(identifier, data, transcript.complete_bytes, transcript.session_id, target, stat)
+        state.save_checkpoint(identifier, data, transcript.complete_bytes, transcript.session_id, target, stat, adapter_version=adapter_version)
         from .codex_titles import index_title
         index_title(config, source, transcript, connection, project=target)
     finally:
@@ -560,11 +597,21 @@ def cached_context(state: LocalState, key: str) -> str:
     return ""
 
 
+def _oldest_first(paths) -> list[Path]:
+    """Queue discovered transcripts by age so backfilled history keeps its order."""
+    def age(path: Path):
+        try:
+            return (path.stat().st_mtime_ns, str(path))
+        except OSError:
+            return (0, str(path))
+    return sorted(paths, key=age)
+
+
 def discover_paths(config: ClientConfig, state: LocalState) -> int:
     queued = 0
     for configured in config.capture_paths:
         root = Path(configured).expanduser().resolve()
-        candidates = [root] if root.is_file() else root.rglob("*.jsonl") if root.is_dir() else []
+        candidates = [root] if root.is_file() else _oldest_first(root.rglob("*.jsonl")) if root.is_dir() else []
         for candidate in candidates:
             try:
                 resolved = candidate.resolve()
