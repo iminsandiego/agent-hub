@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS memories (
     FOREIGN KEY(superseded_by, project) REFERENCES memories(id, project)
 );
 CREATE INDEX IF NOT EXISTS memories_project_status ON memories(project, status, created_at);
+CREATE INDEX IF NOT EXISTS memories_supersedes ON memories(supersedes, project);
+CREATE INDEX IF NOT EXISTS memories_superseded_by ON memories(superseded_by, project);
 CREATE TABLE IF NOT EXISTS memory_sources (
     project TEXT NOT NULL,
     memory_id TEXT NOT NULL,
@@ -95,6 +97,7 @@ CREATE TABLE IF NOT EXISTS memory_sources (
     FOREIGN KEY(memory_id, project) REFERENCES memories(id, project),
     FOREIGN KEY(event_id, project) REFERENCES events(id, project)
 );
+CREATE INDEX IF NOT EXISTS memory_sources_event ON memory_sources(event_id, project);
 CREATE TABLE IF NOT EXISTS memory_keys (
     project TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -103,6 +106,7 @@ CREATE TABLE IF NOT EXISTS memory_keys (
     PRIMARY KEY(project, key),
     FOREIGN KEY(memory_id, project) REFERENCES memories(id, project)
 );
+CREATE INDEX IF NOT EXISTS memory_keys_memory ON memory_keys(memory_id, project);
 CREATE TABLE IF NOT EXISTS memory_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,
@@ -115,6 +119,8 @@ CREATE TABLE IF NOT EXISTS memory_reviews (
     FOREIGN KEY(memory_id, project) REFERENCES memories(id, project),
     FOREIGN KEY(related_memory_id, project) REFERENCES memories(id, project)
 );
+CREATE INDEX IF NOT EXISTS memory_reviews_memory ON memory_reviews(memory_id, project);
+CREATE INDEX IF NOT EXISTS memory_reviews_related ON memory_reviews(related_memory_id, project);
 CREATE TABLE IF NOT EXISTS tree_nodes (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL REFERENCES projects(id),
@@ -138,6 +144,11 @@ CREATE TABLE IF NOT EXISTS tree_nodes (
 );
 CREATE INDEX IF NOT EXISTS tree_project_mode ON tree_nodes(project, mode, hi, lo)
 ;
+-- Foreign-key child columns need their own index: without one, deleting a
+-- referenced row scans every row of the project to check for references.
+CREATE INDEX IF NOT EXISTS tree_left ON tree_nodes(left_id, project);
+CREATE INDEX IF NOT EXISTS tree_right ON tree_nodes(right_id, project);
+CREATE INDEX IF NOT EXISTS tree_event ON tree_nodes(event_id, project);
 CREATE TABLE IF NOT EXISTS erased_sequences (
     project TEXT NOT NULL REFERENCES projects(id), sequence INTEGER NOT NULL,
     PRIMARY KEY(project,sequence)
