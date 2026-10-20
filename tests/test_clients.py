@@ -419,6 +419,8 @@ def test_first_prompt_gets_matching_history_once_per_session(cfg, tmp_path):
     assert prompt_context(cfg, {**payload, "session_id": "native-3"}, memory=empty) == {}
     offline = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
     assert prompt_context(cfg, {**payload, "session_id": "native-4"}, memory=offline) == {}
+    # An outage on the first prompt leaves the next prompt to try again.
+    assert prompt_context(cfg, {**payload, "session_id": "native-4", "prompt": "the garden again"}, memory=online)
 
 
 def test_hook_context_stays_under_the_claude_code_hook_limit(cfg, tmp_path):

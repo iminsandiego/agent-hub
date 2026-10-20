@@ -513,7 +513,7 @@ def test_matches_are_grouped_by_chat_and_sections_are_validated(store):
     ingest(store, [event(0, "garden shed plan")], session="two")
     pack = store.context("alpha", 6000, "please tell me about the garden", ["matches"])
     lines = [line for line in pack["text"].splitlines() if line[:1].isdigit()]
-    assert len(lines) == 3 and sum("garden hose" in line for line in lines) == 2
+    assert len(lines) == 4 and sum("garden hose" in line for line in lines) == 3  # at most three per chat
     assert all(" | chat: " in line for line in lines) and "## History" not in pack["text"]
     with pytest.raises(ValueError, match="sections"):
         store.context("alpha", 4000, sections=["everything"])

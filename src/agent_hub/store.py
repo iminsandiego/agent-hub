@@ -325,17 +325,32 @@ def _excerpt(text: str, maximum: int = 1000) -> str:
 
 
 def _match_excerpt(text: str, terms: list[str], maximum: int = 1000) -> str:
-    """An excerpt around the first matched term, so a match deep in a long record shows."""
+    """The window of a long record holding the most distinct query terms, so the
+    part that matched shows (and what follows it, where an answer usually is)."""
     if len(text) <= maximum:
         return text
     lowered = text.lower()
-    found = [index for index in (lowered.find(term.lower()) for term in terms) if index >= 0]
-    if not found:
+    hits = sorted((match.start(), term) for term in {t.lower() for t in terms}
+                  for match in re.finditer(re.escape(term), lowered))
+    if not hits:
         return _excerpt(text, maximum)
-    start = max(0, min(found) - maximum // 4)
-    end = min(len(text), start + maximum - 2)
-    start = max(0, end - (maximum - 2))
+    width = maximum - 2
+    best, best_start = -1, 0
+    for index, (position, _) in enumerate(hits):
+        start = max(0, position - width // 4)
+        covered = {term for at, term in hits[index:] if at < start + width}
+        if len(covered) > best:
+            best, best_start = len(covered), start
+    start = max(0, min(best_start, len(text) - width))
+    end = min(len(text), start + width)
     return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
+def _coverage(text: str, terms: list[str]) -> float:
+    """Share of distinct query terms a record contains."""
+    lowered = text.lower()
+    distinct = {term.lower() for term in terms}
+    return sum(term in lowered for term in distinct) / len(distinct) if distinct else 0.0
 
 
 class Store:
@@ -844,6 +859,13 @@ class Store:
             matches = keep(rows)
             if len(rows) == fetch and len(matches) < limit:
                 matches = keep(candidates(True))  # other projects crowded this one out
+            # bm25 over OR-ed terms favors a record repeating one rare word; weight the
+            # best candidates by how many of the query's terms they contain.
+            if len(terms) > 1:
+                for match in matches[:300]:
+                    if match["item_type"] == "event":
+                        text = con.execute("SELECT text FROM events WHERE id=?", (match["item_id"],)).fetchone()[0]
+                        match["rank"] *= 1 + _coverage(text, terms)
             # Injected and derived records follow the conversation's own; a tool's
             # call or output is weighted down a little (bm25 ranks are negative).
             matches.sort(key=lambda m: (m["class"] in DEMOTED, m["rank"] * (0.75 if m["class"] == TOOL else 1.0)))
@@ -1389,7 +1411,8 @@ class Store:
                 statement = _flat(_excerpt(memory["statement"], 1400)) + (" [statement truncated]" if statement_truncated else "")
                 notes.append((identifier, f"note {identifier} | {memory['kind']} | {sources} | {statement}\n"))
             labels: dict[str, str] = {}
-            matches = self._match_lines(con, project, search_hits, labels) if "matches" in wanted else []
+            terms = self._terms(query) if query else []
+            matches = self._match_lines(con, project, search_hits, labels, terms) if "matches" in wanted else []
             included: dict[str, list[str]] = {"memory": [], "event": [], "node": [], "session": []}
             pieces = [header]
             used, used_bytes = len(header), len(header.encode("utf-8"))
@@ -1483,19 +1506,20 @@ class Store:
             rows.append((chat["session_id"], f"{chat['opening']}+1 | {when} | {chat['client']} | {label}\n"))
         return rows
 
-    def _match_lines(self, con: sqlite3.Connection, project: str, hits: list[dict[str, Any]], labels: dict[str, str]) -> list[tuple[str, str]]:
-        """Event hits as lines, at most two per chat, each naming its chat."""
+    def _match_lines(self, con: sqlite3.Connection, project: str, hits: list[dict[str, Any]], labels: dict[str, str],
+                     terms: list[str]) -> list[tuple[str, str]]:
+        """Event hits as lines, at most three per chat, each naming its chat."""
         per_chat: dict[str, int] = {}
         rows = []
         for hit in hits:
             if hit["type"] != "event" or hit.get("class") == TITLE:
                 continue  # a title already names every matching chat's line
-            if per_chat.get(hit["session_id"], 0) >= 2:
+            if per_chat.get(hit["session_id"], 0) >= 3:
                 continue
             per_chat[hit["session_id"]] = per_chat.get(hit["session_id"], 0) + 1
             label = _excerpt(self._chat_label(con, project, hit["session_id"], labels), 90)
             rows.append((hit["id"], f"{hit['sequence']}+1 | {_when(hit['timestamp'], hit['timestamp'])} | chat: {label} | "
-                                    f"{hit['role']}: {_flat(_excerpt(hit['excerpt'], 420))}\n"))
+                                    f"{hit['role']}: {_flat(_match_excerpt(hit['excerpt'], terms, 480))}\n"))
         return rows
 
     def _node_line(self, con: sqlite3.Connection, project: str, node: dict[str, Any]) -> str:

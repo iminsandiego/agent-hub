@@ -416,13 +416,20 @@ class LocalState:
                 return db.execute(reset).rowcount
             return sum(db.execute(reset + " AND id=?", (identifier,)).rowcount for identifier in identifiers)
 
-    def first_prompt(self, session: str, *, now: float | None = None) -> bool:
-        """True once per native session: the first prompt gets matching history."""
+    @staticmethod
+    def _prompt_key(session: str) -> str:
+        return hashlib.sha256(session.encode("utf-8")).hexdigest()
+
+    def prompted(self, session: str) -> bool:
+        """Whether this native session's first prompt already got matching history."""
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM prompted WHERE session=?", (self._prompt_key(session),)).fetchone() is not None
+
+    def mark_prompted(self, session: str, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
-        key = hashlib.sha256(session.encode("utf-8")).hexdigest()
         with self.connect() as db:
             db.execute("DELETE FROM prompted WHERE at<?", (now - 90 * 86400,))
-            return db.execute("INSERT OR IGNORE INTO prompted VALUES(?,?)", (key, now)).rowcount == 1
+            db.execute("INSERT OR IGNORE INTO prompted VALUES(?,?)", (self._prompt_key(session), now))
 
     def checkpoint(self, identifier: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -649,7 +656,7 @@ def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_char
     if not isinstance(prompt, str) or not prompt.strip() or not isinstance(session, str) or not session:
         return {}
     state = LocalState(config)
-    if not state.first_prompt(session):
+    if state.prompted(session):
         return {}
     project = config.resolve_project(payload.get("cwd"))
     owned = memory is None
@@ -671,6 +678,8 @@ def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_char
     finally:
         if owned:
             connection.close()
+    # Marked only once the service answered, so an outage leaves the next prompt to try.
+    state.mark_prompted(session)
     text = str(result.get("text", ""))
     if not result.get("event_ids"):
         return {}
