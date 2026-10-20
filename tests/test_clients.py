@@ -482,7 +482,7 @@ def test_setup_preserves_unrelated_settings_is_idempotent_and_has_no_secret(cfg,
     codex_prompt = [h for group in hooks["hooks"]["UserPromptSubmit"] for h in group["hooks"]][0]
     codex_start = [h for group in hooks["hooks"]["SessionStart"] for h in group["hooks"]][0]
     # Codex counts additionalContextLimit in tokens (measured with 0.163.0).
-    assert codex_prompt["additionalContextLimit"] == codex_start["additionalContextLimit"] == 4000
+    assert codex_prompt["additionalContextLimit"] == codex_start["additionalContextLimit"] == 6000
     for target in [codex_file, hooks_file, claude_mcp, claude_settings]:
         assert "synthetic-test-token" not in target.read_text()
 

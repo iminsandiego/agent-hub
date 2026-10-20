@@ -195,11 +195,72 @@ def test_span_detail_skips_spans_of_only_hidden_records(store):
         assert time.monotonic() - started < 0.2  # quadratic before 0.1.12's fix: about 0.8 s here
 
 
-def test_classifier_readiness_is_reported(store):
-    assert store.stats("alpha")["classifier"]["applied"] is None
-    store.rebuild_tree("alpha")
+def test_classifier_readiness_is_reported_and_prune_requires_current_classes(store):
+    import sqlite3
     stats = store.stats("alpha")["classifier"]
-    assert stats["applied"] == stats["current"]
+    assert stats["applied"] == stats["current"]  # a new project is classified as records arrive
+    with sqlite3.connect(store.path) as con:  # an archive upgraded from 0.1.11
+        con.execute("DELETE FROM derived_versions")
+    assert store.stats("alpha")["classifier"]["applied"] is None
+    with pytest.raises(ValueError, match="rebuild"):
+        store.prune("alpha")
+    store.rebuild_tree("alpha")
+    assert store.prune("alpha")["records_removed"] == 0
+
+
+def test_prune_report_does_not_take_the_write_lock(store):
+    import sqlite3
+    store.ingest("alpha", "codex", "m", "s", [record(0, "user", "hello")])
+    writer = sqlite3.connect(store.path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        assert store.prune("alpha")["records_removed"] == 0
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+
+def test_search_index_holds_only_searchable_records(store):
+    import sqlite3
+    meta = codex("session_meta", {"id": "t", "cwd": "/w"})
+    store.ingest("alpha", "codex", "m", "t", [record(0, "system", "Codex session_meta metadata.", meta),
+                                             record(1, "user", "codex session question")])
+    indexed = lambda: {row[0] for row in sqlite3.connect(store.path).execute(
+        "SELECT e.role FROM history_fts h JOIN events e ON e.id=h.item_id WHERE h.item_type='event'")}
+    assert indexed() == {"user"}
+    # An archive from 0.1.11 indexed everything; rebuild takes the metadata back out.
+    with sqlite3.connect(store.path) as con:
+        con.execute("INSERT INTO history_fts(project,item_type,item_id,content) SELECT project,'event',id,text FROM events WHERE role='system'")
+        con.execute("DELETE FROM derived_versions WHERE name='search_index'")
+    store.rebuild_tree("alpha")
+    assert indexed() == {"user"}
+    assert [hit["role"] for hit in store.search("alpha", "codex session")] == ["user"]
+
+
+def test_compaction_and_turn_context_records():
+    with_summary = codex("compacted", {"message": "Summary of the earlier work", "replacement_history": []})
+    assert classify_event("system", "Summary of the earlier work", with_summary) == INJECTED
+    assert classify_event("system", "Codex compacted metadata.", codex("compacted", {"message": ""})) == BOOKKEEPING
+    assert classify_event("system", '{"cwd": "/w"}', codex("turn_context", {"cwd": "/w"})) == BOOKKEEPING
+
+
+def test_a_message_is_injected_only_when_every_block_is():
+    mixed = json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "text", "text": "<system-reminder>context</system-reminder>"}, {"type": "text", "text": "Fix the porch light"}]}})
+    assert classify_event("user", "<system-reminder>context</system-reminder>\nFix the porch light", mixed) is None
+    only = json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "<system-reminder>x</system-reminder>"}]}})
+    assert classify_event("user", "<system-reminder>x</system-reminder>", only) == INJECTED
+    assert classify_event("user", "<pasted_content id=1>log text</pasted_content>", "") is None
+
+
+def test_a_codex_title_captured_before_its_chat_names_it_when_it_arrives(store):
+    from agent_hub.store import _hash
+    target = "s_" + _hash(["alpha", "codex", "m", "late"])
+    store.ingest("alpha", "generic", "m", "codex-title-v1:late", [record(0, "system",
+        f"Codex chat title: Roof plan\nNative session: late\nAgent Hub original session: {target}", json.dumps({"name": "Roof plan"}))],
+        {"format": "codex_sqlite_title_v1"})
+    store.ingest("alpha", "codex", "m", "late", [record(0, "user", "Plan the roof")])
+    assert "Roof plan — Plan the roof" in store.context("alpha", 4000, sections=["chats"])["text"]
 
 
 def test_stdio_gateway_forwards_sections(tmp_path, monkeypatch):

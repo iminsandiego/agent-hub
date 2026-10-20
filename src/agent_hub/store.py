@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .classify import (BOOKKEEPING, CLASSIFIER_VERSION, DEMOTED, DERIVED, TITLE, TOOL, UNSEARCHED, chat_title,
-                       classify_event, classify_session, excluded_session)
+                       classify_event, classify_session, excluded_session, needs_whole_source)
 from .tree import SUMMARY_BYTES, event_source, make_leaf, merge_nodes, node_id
 from .tree import node_id as node_id_for
 
@@ -475,6 +475,7 @@ class Store:
         return result
 
     def create_project(self, project: str, name: str = "") -> dict[str, Any]:
+        """Create a project; its records are classified as they arrive (current rules)."""
         _text(project, "project")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", project):
             raise ValueError("project must be a lowercase slug of at most 64 characters")
@@ -486,6 +487,8 @@ class Store:
                     "INSERT INTO projects(id,name,created_at) VALUES(?,?,?)",
                     (project, name or project, _now()),
                 )
+                con.executemany("INSERT INTO derived_versions VALUES(?,?,?)",
+                                [(project, "classifier", CLASSIFIER_VERSION), (project, "search_index", 1)])
             elif name and name != row["name"]:
                 raise ValueError("Project already exists with a different name")
             return dict(self._project(con, project))
@@ -619,7 +622,7 @@ class Store:
                     (identifier, project, internal_session, external_id, next_sequence,
                      role, text, raw, timestamp, now, payload_hash),
                 )
-                if self.fts_enabled:
+                if self.fts_enabled and event_class not in UNSEARCHED:
                     con.execute(
                         "INSERT INTO history_fts(project,item_type,item_id,content) VALUES(?,'event',?,?)",
                         (project, identifier, text),
@@ -632,6 +635,8 @@ class Store:
                 next_sequence += 1
                 inserted += 1
                 event_ids.append(identifier)
+            if inserted and existing is None:
+                self._apply_waiting_titles(con, project, internal_session)
             if inserted:
                 con.execute("UPDATE projects SET next_sequence=? WHERE id=?", (next_sequence, project))
                 con.execute(
@@ -841,7 +846,7 @@ class Store:
             def candidates(scoped: bool, offset: int) -> list[sqlite3.Row]:
                 return con.execute(
                     "SELECT h.item_type,h.item_id,bm25(history_fts) AS rank FROM history_fts h "
-                    "WHERE history_fts MATCH ?" + (" AND h.project=?" if scoped else "") + " ORDER BY rank LIMIT ? OFFSET ?",
+                    "WHERE history_fts MATCH ?" + (" AND h.project=?" if scoped else "") + " ORDER BY rank,h.rowid LIMIT ? OFFSET ?",
                     (expression, project, fetch, offset) if scoped else (expression, fetch, offset)).fetchall()
 
             def keep(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
@@ -1271,16 +1276,18 @@ class Store:
         ``reorder_by_time`` and the tree is rebuilt. Without ``apply`` nothing
         is written; with it, run ``VACUUM`` afterwards to return the space.
         """
-        with self._connection(write=True) as con:
+        with (self._connection(write=True) if apply else self._read()) as con:
             self._project(con, project)
+            version = con.execute("SELECT version FROM derived_versions WHERE project=? AND name='classifier'", (project,)).fetchone()
+            if version is None or version[0] != CLASSIFIER_VERSION:
+                # Pruning acts on classes; never on ones computed by older rules.
+                raise ValueError(f"Records are not classified with the current rules; run agent-hub rebuild --project {project} first")
             # The deleted text is not zeroed in place (secure_delete would log a copy
             # of every freed page, several GB): VACUUM afterwards rewrites the file
             # without it, which the admin command does.
             con.execute("PRAGMA secure_delete=OFF")
             con.execute("SAVEPOINT prune")
-            version = con.execute("SELECT version FROM derived_versions WHERE project=? AND name='classifier'", (project,)).fetchone()
-            # Current rules first (rebuild does this too: skipped when already current).
-            classes = self._reclassify(con, project) if version is None or version[0] != CLASSIFIER_VERSION else {}
+            classes: dict[str, int] = {}
             excluded: dict[str, str] = {}
             for session in con.execute("SELECT id,client,metadata_json FROM sessions WHERE project=?", (project,)).fetchall():
                 first = con.execute("SELECT text,raw FROM events WHERE project=? AND session_id=? ORDER BY sequence LIMIT 1",
@@ -1342,6 +1349,11 @@ class Store:
 
     def _reclassify(self, con: sqlite3.Connection, project: str) -> dict[str, int]:
         """Recompute every record's and session's class (classify.py) from the archive."""
+        unsearched = ",".join("'" + value + "'" for value in UNSEARCHED)
+        # The search index holds only searchable records; remember which were left out.
+        con.execute("CREATE TEMP TABLE reclassify_unsearched_before(id TEXT PRIMARY KEY)")
+        con.execute("INSERT INTO reclassify_unsearched_before SELECT event_id FROM event_classes "
+                    f"WHERE project=? AND class IN ({unsearched})", (project,))
         con.execute("DELETE FROM event_classes WHERE project=?", (project,))
         con.execute("DELETE FROM session_classes WHERE project=?", (project,))
         con.execute("DELETE FROM session_index WHERE project=?", (project,))
@@ -1360,7 +1372,7 @@ class Store:
             # A head is enough for most records; an unread type (queued prompt,
             # title) or an empty one (image payload) is judged on its whole source,
             # exactly as at ingest.
-            if len(raw) == 400 and (row["text"].startswith("Unsupported ") or not row["text"].strip()):
+            if len(raw) == 400 and needs_whole_source(row["role"], row["text"]):
                 raw = con.execute("SELECT raw FROM events WHERE id=?", (row["id"],)).fetchone()[0]
             value = classify_event(row["role"], row["text"], raw)
             if value:
@@ -1371,8 +1383,20 @@ class Store:
                 con.executemany("INSERT INTO event_classes VALUES(?,?,?)", batch)
                 batch.clear()
         con.executemany("INSERT INTO event_classes VALUES(?,?,?)", batch)
-        con.execute("INSERT INTO derived_versions VALUES(?,?,?) ON CONFLICT(project,name) DO UPDATE SET version=excluded.version",
-                    (project, "classifier", CLASSIFIER_VERSION))
+        if self.fts_enabled:
+            now_unsearched = f"SELECT event_id FROM event_classes WHERE project=? AND class IN ({unsearched})"
+            scoped = con.execute("SELECT 1 FROM derived_versions WHERE project=? AND name='search_index'", (project,)).fetchone()
+            # Until the index is known to follow the classes (a 0.1.11 archive indexed
+            # every record), take out every unsearched record, not only new ones.
+            kept_out = "" if scoped is None else " AND event_id NOT IN (SELECT id FROM reclassify_unsearched_before)"
+            con.execute("DELETE FROM history_fts WHERE item_type='event' AND item_id IN "
+                        f"({now_unsearched}{kept_out})", (project,))
+            con.execute("INSERT INTO history_fts(project,item_type,item_id,content) SELECT e.project,'event',e.id,e.text FROM events e "
+                        f"WHERE e.id IN (SELECT id FROM reclassify_unsearched_before) AND e.id NOT IN ({now_unsearched})", (project,))
+        con.execute("DROP TABLE reclassify_unsearched_before")
+        for name, version in (("classifier", CLASSIFIER_VERSION), ("search_index", 1)):
+            con.execute("INSERT INTO derived_versions VALUES(?,?,?) ON CONFLICT(project,name) DO UPDATE SET version=excluded.version",
+                        (project, name, version))
         return counts
 
     @staticmethod
@@ -1399,10 +1423,24 @@ class Store:
             target = target or session
             if target != session and not con.execute("SELECT 1 FROM sessions WHERE id=? AND project=?", (target, project)).fetchone():
                 return
-            con.execute("INSERT INTO session_index(session_id,project) VALUES(?,?) ON CONFLICT(session_id) DO NOTHING", (target, project))
-            # A user's own rename outranks a generated title; otherwise the latest wins.
-            con.execute("UPDATE session_index SET title=?,title_source=? WHERE session_id=? "
-                        "AND (title_source IS NULL OR title_source!='custom' OR ?='custom')", (title, source, target, source))
+            Store._set_title(con, project, target, title, source)
+
+    @staticmethod
+    def _set_title(con: sqlite3.Connection, project: str, session: str, title: str, source: str) -> None:
+        con.execute("INSERT INTO session_index(session_id,project) VALUES(?,?) ON CONFLICT(session_id) DO NOTHING", (session, project))
+        # A user's own rename outranks a generated title; otherwise the latest wins.
+        con.execute("UPDATE session_index SET title=?,title_source=? WHERE session_id=? "
+                    "AND (title_source IS NULL OR title_source!='custom' OR ?='custom')", (title, source, session, source))
+
+    def _apply_waiting_titles(self, con: sqlite3.Connection, project: str, session: str) -> None:
+        """Apply a Codex thread name captured before the chat it names."""
+        for (text,) in con.execute(
+                "SELECT e.text FROM events e JOIN session_classes c ON c.session_id=e.session_id "
+                f"WHERE e.project=? AND c.class='{TITLE}' AND e.text LIKE ? ORDER BY e.sequence",
+                (project, "%Agent Hub original session: " + session + "%")).fetchall():
+            named = chat_title(text, "")
+            if named and named[2] == session:
+                self._set_title(con, project, session, named[0], named[1])
 
     def rebuild_tree(self, project: str) -> dict[str, Any]:
         """Reclassify the project's records, then rebuild its tree from them."""

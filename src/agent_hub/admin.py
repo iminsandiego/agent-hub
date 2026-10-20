@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 from .auth import AuthStore
 from .config import ServerSettings, load_settings, write_private
@@ -186,6 +187,8 @@ def _renumbering(args, change):
             for item, old in ledger.execute("SELECT item,sequence FROM blocked WHERE project=? AND stage='extract'", (args.project,)).fetchall():
                 if old in mapping:
                     ledger.execute("UPDATE blocked SET sequence=? WHERE project=? AND stage='extract' AND item=?", (mapping[old], args.project, item))
+                else:  # its record was pruned; the position now names another record
+                    ledger.execute("DELETE FROM blocked WHERE project=? AND stage='extract' AND item=?", (args.project, item))
             # Tree positions now name different records: rediscover summary blocks.
             cleared = ledger.execute("DELETE FROM blocked WHERE project=? AND stage='summary'", (args.project,)).rowcount
             ledger.execute("DELETE FROM rejections WHERE project=? AND stage='summary'", (args.project,))
@@ -218,16 +221,22 @@ def prune(args):
     before = database.stat().st_size
     result = _renumbering(args, lambda store: store.prune(args.project, apply=True))
     import sqlite3
-    # VACUUM rewrites the file without the freed pages; it needs about the new
-    # size in free disk space and briefly blocks writers (uploads wait and retry).
-    con = sqlite3.connect(database, timeout=60)
+    # The deletion is committed; VACUUM only returns the space. It needs about the
+    # new size in free disk space and briefly blocks writers (uploads wait and
+    # retry). If it fails, the report still prints; running prune --apply again
+    # removes nothing more and repeats the VACUUM.
+    vacuum: dict[str, Any] = {"ok": True}
     try:
-        con.execute("PRAGMA busy_timeout=60000")
-        con.execute("VACUUM")
-        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    finally:
-        con.close()
-    output({**result, "file_bytes": {"before": before, "after": database.stat().st_size}})
+        con = sqlite3.connect(database, timeout=60)
+        try:
+            con.execute("PRAGMA busy_timeout=60000")
+            con.execute("VACUUM")
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        vacuum = {"ok": False, "error": str(exc), "retry": f"agent-hub prune --project {args.project} --apply"}
+    output({**result, "vacuum": vacuum, "file_bytes": {"before": before, "after": database.stat().st_size}})
 
 
 def rebuild(args):

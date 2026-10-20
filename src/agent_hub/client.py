@@ -560,8 +560,8 @@ def _ingest_file_version(
             duplicates += int(receipt.get("duplicates", 0))
             offset = batch[-1]["_end_offset"]
             state.save_checkpoint(identifier, data, offset, transcript.session_id, target, stat, adapter_version=adapter_version)
-            if receipt.get("suppressed"):
-                break
+            if receipt.get("suppressed") or receipt.get("excluded"):
+                break  # the server keeps none of this session
         # Blank separator lines are safe to checkpoint after all events commit.
         state.save_checkpoint(identifier, data, transcript.complete_bytes, transcript.session_id, target, stat, adapter_version=adapter_version)
         from .codex_titles import index_title

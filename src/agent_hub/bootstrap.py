@@ -83,9 +83,9 @@ def _hook_handler(client: str, config_path: Path, executable: str, event: str) -
         if event in {"SessionStart", "UserPromptSubmit"}:
             # Codex counts this limit in tokens and, past it, keeps the start and
             # end of the text (default about 2,500; measured with 0.163.0). The
-            # client sends at most HOOK_CONTEXT_CHARS (9,500) characters, which
-            # is 2,400-3,200 tokens, so this leaves headroom.
-            handler["additionalContextLimit"] = 4000
+            # client sends at most HOOK_CONTEXT_CHARS (9,500) characters; code- and
+            # JSON-heavy history runs about 2.2 characters per token (4,300 tokens).
+            handler["additionalContextLimit"] = 6000
     return handler
 
 

@@ -69,12 +69,12 @@ _NOISE_TYPES = {
 _INJECTED = re.compile(r"^\s*(<[a-z_][a-z0-9_-]*[ >]|# AGENTS\.md|Caveat: The messages below were generated|"
                        r"Context handoff \()", re.I)
 # Slash commands and subagent reports are the user's or an agent's own actions.
-_KEPT_TAGS = re.compile(r"^\s*<(command-name|command-message|subagent_notification)>", re.I)
+_KEPT_TAGS = re.compile(r"^\s*<(command-name|command-message|subagent_notification|pasted_content)[ >]", re.I)
 
 
 # A Codex rollout line starts {"timestamp":..,"type":..,"payload":{"type":..}; the
 # head is enough, so classifying never parses a large record.
-_HEAD = re.compile(r'"type"\s*:\s*"(event_msg|response_item|session_meta)"\s*,\s*"payload"\s*:\s*\{\s*(?:"type"\s*:\s*"([a-z_]+)")?')
+_HEAD = re.compile(r'"type"\s*:\s*"(event_msg|response_item|session_meta|turn_context|compacted)"\s*,\s*"payload"\s*:\s*\{\s*(?:"type"\s*:\s*"([a-z_]+)")?')
 # Claude Code log records that only repeat or track other records: a queued
 # prompt's bookkeeping copy, file snapshots and progress ticks.
 _CLAUDE_BOOKKEEPING = re.compile(r'"type"\s*:\s*"(queue-operation|file-history-snapshot|progress)"')
@@ -91,6 +91,12 @@ def classify_event(role: str, text: str, raw: str = "") -> str | None:
     kind, payload_kind = _raw_kind(raw) if raw else (None, None)
     if kind == "session_meta":
         return METADATA
+    if kind == "turn_context":
+        return BOOKKEEPING
+    if kind == "compacted":
+        # A compaction's own summary is harness-written context; without one the
+        # record is only a copy of the history before it.
+        return BOOKKEEPING if not text.strip() or _MARKER.match(text) else INJECTED
     if role == "system" and chat_title(text, raw):
         return TITLE
     if not text.strip():
@@ -116,7 +122,7 @@ def classify_event(role: str, text: str, raw: str = "") -> str | None:
         return INJECTED
     if role == "developer":
         return INJECTED
-    if role in {"user", "system"} and _INJECTED.match(text) and not _KEPT_TAGS.match(text):
+    if role in {"user", "system"} and _INJECTED.match(text) and not _KEPT_TAGS.match(text) and _all_blocks_injected(raw):
         return INJECTED
     if role == "tool" or (role == "assistant" and text.startswith("Tool call:")):
         return TOOL
@@ -171,6 +177,32 @@ def chat_title(text: str, raw: str) -> tuple[str, str, str | None] | None:
     if match and match[1].strip():
         return match[1].strip(), "codex", match[2]
     return None
+
+
+def _all_blocks_injected(raw: str) -> bool:
+    """Whether every text block of a message is client-injected (not only the first).
+
+    A message whose first block is an environment or instruction block can still
+    carry the user's own words in a later block; only an all-injected message is
+    injected. A record whose blocks cannot be read is judged by its joined text.
+    """
+    try:
+        value = json.loads(raw) if raw else None
+    except ValueError:
+        return True
+    if not isinstance(value, dict):
+        return True
+    holder = value.get("message") if isinstance(value.get("message"), dict) else value.get("payload")
+    content = holder.get("content") if isinstance(holder, dict) else None
+    if not isinstance(content, list):
+        return True
+    texts = [block.get("text") for block in content if isinstance(block, dict) and isinstance(block.get("text"), str)]
+    return all(_INJECTED.match(text) and not _KEPT_TAGS.match(text) for text in texts if text.strip())
+
+
+def needs_whole_source(role: str, text: str) -> bool:
+    """Whether classifying this record reads past its first 400 raw characters."""
+    return not text.strip() or text.startswith("Unsupported ") or (role in {"user", "system"} and bool(_INJECTED.match(text)))
 
 
 def classify_session(client: str, metadata: dict[str, Any], first_raw: str | None = None) -> str | None:
