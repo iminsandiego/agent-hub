@@ -21,9 +21,21 @@ All home-archive measurements used an online backup of the live database on agen
 
 A larger pack did not help; the first prompt's matches did. The startup section names recent work but holds few exact facts.
 
-**Summary model trial** (5 regions of 8 conversation records, bottom-up as the worker does it; isolated `claude -p` on the subscription): haiku/low 58 calls, 95% within 512 bytes after retries, $0.0013 API-equivalent per call; haiku/medium 54 calls, 100%, $0.0013; sonnet/low 56 calls, 97.4%, $0.018. Haiku twice returned the prompt's ruler of dashes and once a `<budget:…>` tag as a summary under the byte limit, and it mixed preceding-context facts into leaf summaries; Sonnet did neither. Input averaged about 2.2 characters per token (JSON-escaped, code-heavy text).
+**Summary model trial** (5 regions of 8 conversation records, bottom-up as the worker does it, on the subscriptions: Claude through isolated `claude -p`, Codex through `codex exec --ephemeral` in a temporary `CODEX_HOME` with the worker's prompt as `model_instructions_file`). "Fits" = at most 512 bytes; "junk" = an accepted line the 0.1.12 check rejects.
 
-**Dry-run usage estimate** (worker rules simulated over the cleaned tree; nothing written): conversation only, 2,656 leaf and 13,857 merge calls for a first pass (16,513; about 23,000 with the measured shortening rate), mean input 21,000 characters (19,000 of it preceding context and span detail), about 67 calls a day for new history; with tool output included, 120,144 calls and 474 a day. Preceding context of 4,000 and span detail of 2,000 characters would cut mean input to 8,800 characters.
+| Model / effort | Calls | Fits first try | Fits after retries | Junk | Input tokens per call (cached) | Output | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Haiku 5.5 / low | 58 | 68% | 95% | 3 (ruler copies) | 5,560 (12%) | 634 | 4.0 |
+| Haiku 5.5 / medium | 54 | 71% | 100% | 2 (ruler, `<budget:…>` tag) | 5,480 (37%) | 1,180 | 5.9 |
+| Sonnet 5.5 / low | 56 | 64% | 97% | 0 | 4,601 (14%) | 210 | 4.8 |
+| GPT-6-Luna / low | 75 (cap) | 48% | 62% | 0 | 13,712 (52%) | 153 | 17.1 |
+| GPT-6-Luna / medium | 75 (cap) | 50% | 68% | 0 | 13,593 (58%) | 168 | 17.0 |
+| GPT-6.1-Sol / low | 53 | 79% | 98% | 0 | 12,933 (55%) | 127 | 16.1 |
+| GPT-6.1-Sol / medium | 53 | 81% | 98% | 0 | 13,197 (57%) | 158 | 20.8 |
+
+Reading the lines side by side: Haiku and GPT-6-Luna mixed preceding-context facts (the user's earlier words) into summaries of tool-output leaves; Luna rarely fit and fell back to excerpts. Sonnet and GPT-6.1-Sol kept to each record, kept attribution and exact IDs and paths; Sol fit most often and drew more facts from long tool output; Sonnet abbreviated raw coordinates that Sol copied. Sol low and medium were nearly identical. About 10,000 of Sol's input tokens per call are `codex exec`'s own instructions and tool list (measured with an empty prompt), mostly cached. GPT-6.1-Luna was not offered by the Codex catalog (gpt-6-luna was tested). Recommendation if summaries are enabled: GPT-6.1-Sol at low effort on the Codex subscription, Sonnet 5.5 at low effort as the alternative; not Haiku or Luna. The worker would need a subscription backend (it calls an OpenAI-compatible API today), ideally one long-lived `codex app-server` session rather than a process per call. Input averaged about 2.2 characters per token (JSON-escaped, code-heavy text).
+
+**Dry-run usage estimate** (worker rules simulated over the cleaned tree; nothing written): conversation only, 2,656 leaf and 13,857 merge calls for a first pass (16,513; about 23,000 with the measured shortening rate), mean input 21,000 characters (19,000 of it preceding context and span detail), about 67 calls a day for new history; with tool output included, 120,144 calls and 474 a day. Preceding context of 4,000 and span detail of 2,000 characters would cut mean input to 8,800 characters. With GPT-6.1-Sol (measured 1.23 calls per node, about 10,000 tokens of `codex exec` overhead per call), the conversation-only first pass is about 20,000 calls and 400 million input tokens (280 million with the smaller context), at 16 s per sequential call about 90 hours; afterwards about 80 calls and 1.6 million tokens a day.
 
 macOS, CPython 3.12.14: `PYTHONPATH=src python -m pytest -q` ran 388 tests, all passed (one upstream Starlette warning).
 
