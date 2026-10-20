@@ -1,3 +1,13 @@
+## 0.1.10 foreign-key indexes, October 20, 2026
+
+On the home VM, `agent-hub reorder --project home --apply` (0.1.9) stayed in the tree rebuild's first `DELETE FROM tree_nodes` for 40 minutes (py-spy stack at `store.py` `_rebuild_tree`; 1.36 TB read through `/proc/<pid>/io`, almost no writes) and was stopped without committing. `EXPLAIN QUERY PLAN` showed the foreign-key child lookups on `tree_nodes.left_id`/`right_id` narrowing only by project.
+
+`tests/test_store.py::test_every_foreign_key_child_column_is_indexed` and `::test_opening_an_older_database_adds_the_foreign_key_indexes` fail on 0.1.9 and pass now. A synthetic benchmark (not part of the suite) timed `reorder_by_time(apply=True)` on macOS, CPython 3.12.14: 4,000 records 8.3 s and 8,000 records 34.1 s on 0.1.9 (quadratic); 0.1 s and 0.3 s with the indexes.
+
+macOS, CPython 3.12.14: `PYTHONPATH=src python -m pytest -q` ran 342 tests, all passed (one upstream Starlette warning). The fix is not yet exercised on the deployed home VM.
+
+---
+
 ## 0.1.9 fixes from the UniiChat comparison, October 19, 2026
 
 UniiChat source (github.com/VictorTaelin/UniiChat, commit 0500bf6) was read as data; none of its code was run. Each Agent Hub bug below was reproduced with a synthetic test that fails on 0.1.8 and passes now:

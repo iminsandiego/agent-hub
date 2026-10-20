@@ -448,6 +448,40 @@ def test_reorder_interleaves_concurrent_sessions_and_drops_forgotten_gaps(store)
     assert max(node["hi"] for node in store.view("alpha", max_nodes=1)) == 5  # six positions, no gap marker left
 
 
+FOREIGN_KEY_INDEXES = ["memories_supersedes", "memories_superseded_by", "memory_sources_event", "memory_keys_memory",
+                       "memory_reviews_memory", "memory_reviews_related", "tree_left", "tree_right", "tree_event"]
+
+
+def test_every_foreign_key_child_column_is_indexed(store):
+    # Deleting a referenced row looks up its children; an index that only narrows
+    # by project scans the whole project per row (a reorder of ~1M tree nodes stalled).
+    con = sqlite3.connect(store.path)
+    tables = [row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%REFERENCES%'")]
+    for table in tables:
+        keys = {}
+        for row in con.execute(f"PRAGMA foreign_key_list({table})"):
+            keys.setdefault(row[0], []).append(row[3])
+        for columns in keys.values():
+            where = " AND ".join(f"{column}=?" for column in columns)
+            plan = " ".join(row[3] for row in con.execute(f"EXPLAIN QUERY PLAN SELECT 1 FROM {table} WHERE {where}", [None] * len(columns)))
+            assert re.search(rf"\b{columns[0]}=\?", plan), (table, columns, plan)
+
+
+def test_opening_an_older_database_adds_the_foreign_key_indexes(tmp_path):
+    path = tmp_path / "memory.sqlite3"
+    older = Store(path)
+    older.create_project("alpha")
+    ingest(older, [event(i) for i in range(5)])
+    con = sqlite3.connect(path)
+    for name in FOREIGN_KEY_INDEXES:
+        con.execute(f"DROP INDEX {name}")
+    con.commit()
+    Store(path)
+    present = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert set(FOREIGN_KEY_INDEXES) <= present
+    assert Store(path).rebuild_tree("alpha")["events"] == 5
+
+
 def test_a_moved_transcript_is_the_same_session_but_a_parser_change_is_not(store):
     store.ingest("alpha", "codex", "m", "s", [event(0)], {"adapter_version": 1, "source_path": "/sessions/a.jsonl"})
     moved = store.ingest("alpha", "codex", "m", "s", [event(0)], {"adapter_version": 1, "source_path": "/archived_sessions/a.jsonl"})
