@@ -1,3 +1,13 @@
+## 0.1.11 set-aside capture jobs, October 20, 2026
+
+On the home Mac, 124 queued capture jobs had 2,000+ attempts: 28 transcripts missing from disk and 96 Codex threads. A read-only `thread/read` through the installed Codex 0.163.0 app-server returned "thread not loaded" for every thread, and none had a rollout file. The VM had 6 missing transcripts. None of the 34 missing transcripts appears in either watcher's scan baseline, so they were never on disk.
+
+New tests in `tests/test_clients.py`: a missing source is set aside only after 24 hours and revived by a new enqueue; another failure restarts the 24 hours; `queue list`/`requeue` through the CLI; a 0.1.10 outbox keeps its jobs when the columns are added; "thread not loaded" maps to a gone source without copying the native message, and other app-server errors do not.
+
+macOS, CPython 3.12.14: `PYTHONPATH=src python -m pytest -q` ran 347 tests, all passed (one upstream Starlette warning).
+
+---
+
 ## 0.1.10 foreign-key indexes, October 20, 2026
 
 On the home VM, `agent-hub reorder --project home --apply` (0.1.9) stayed in the tree rebuild's first `DELETE FROM tree_nodes` for 40 minutes (py-spy stack at `store.py` `_rebuild_tree`; 1.36 TB read through `/proc/<pid>/io`, almost no writes) and was stopped without committing. `EXPLAIN QUERY PLAN` showed the foreign-key child lookups on `tree_nodes.left_id`/`right_id` narrowing only by project.

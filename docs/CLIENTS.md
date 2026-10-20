@@ -174,6 +174,8 @@ HTTP transport does not replace local capture. Keep the hook client and watcher 
 
 The installed `Stop` and `SessionEnd` handlers only enqueue the source path or native thread identity in a local SQLite outbox. They do not read a transcript, call a model, upload over the network, or spawn a background uploader. This keeps end-of-session work short. The independent `watch` process uploads complete records and retries failures with backoff.
 
+A hook can name a source that is never saved: a Claude Code subagent or non-interactive run that writes no transcript, or a Codex background thread the app-server answers with "thread not loaded". Such a job is retried while its source stays missing for 24 hours, then set aside (0.1.11). It is kept, not deleted; it no longer counts as pending or as an error, and `doctor` reports the number under `source_gone`. Any other failure in between restarts the 24 hours. New work for the same source (a changed file, another hook) brings the job back. `agent-hub queue list` shows set-aside jobs with their path or thread ID, and `agent-hub queue requeue ID…` or `--all` retries them.
+
 `SessionStart` requests live context for the mapped directory, capped at 8,000
 characters and trimmed at source-line boundaries. Persistent offline memory
 caches are no longer written or used; upgrade clears their old rows. An outage
@@ -329,6 +331,7 @@ Install Agent Hub, configure the appropriate provider home, and run its watcher 
 | HTTP 401/403 | Check the active token environment variable, token file, revocation, and server project permissions |
 | Unmapped session | Add the correct cwd/worktree mapping; inspect existing project assignment before changing it |
 | Codex thread cannot export | Check watcher PATH, CODEX_HOME, installed protocol version, and whether the thread is persisted |
+| Jobs under `source_gone` | The source was never saved or was removed; `agent-hub queue list` shows them, `queue requeue` retries one that has returned |
 | Partial final line remains pending | Let the writer finish; use `--final` only for an intentionally finished export |
 | Mutation or metadata conflict | Preserve the source and review its identity; do not delete checkpoints to bypass a conflict |
 | SOCKS proxy initialization error | Install the optional `socksio` transport dependency when your environment requires a SOCKS proxy; loopback service traffic bypasses external proxies |

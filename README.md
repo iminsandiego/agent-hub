@@ -2,7 +2,7 @@
 
 A private home for your coding agents' shared memory, with one repository for the service, computer setup, and future MCP servers, plugins, and skills.
 
-**Status: initial implementation, version 0.1.10.** It includes an authenticated Python service, SQLite history, exact captured-record retrieval, project-scoped search, a binary summary tree, a memory browser, client capture/configuration tools, and optional bounded model enrichment. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md). Deployment and native-client checks that require your computers are explicitly distinguished from tests run in development.
+**Status: initial implementation, version 0.1.11.** It includes an authenticated Python service, SQLite history, exact captured-record retrieval, project-scoped search, a binary summary tree, a memory browser, client capture/configuration tools, and optional bounded model enrichment. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md). Deployment and native-client checks that require your computers are explicitly distinguished from tests run in development.
 
 **Home/work separation:** deploy independent domain servers and native profiles. Version 0.1.2 adds server domain guards, strict client project allowlists, cross-project transcript checks and a local backfill planner. Read [the deployment and ingestion design](docs/DOMAINS_AND_INGESTION.md) before configuring mixed-use computers. No production histories have been imported.
 
