@@ -579,7 +579,7 @@ def test_discovered_transcripts_queue_oldest_first(cfg, tmp_path):
     for index, name in enumerate(["zeta", "alpha", "mid"]):
         path = root / f"{name}.jsonl"
         path.write_text("{}\n")
-        os.utime(path, ns=(1_600_000_000_000_000_000 + index, 1_600_000_000_000_000_000 + index))
+        os.utime(path, (1_600_000_000 + index, 1_600_000_000 + index))  # whole seconds: NTFS keeps 100 ns
     cfg.capture_paths = [str(root)]
     state = LocalState(cfg)
     discover_paths(cfg, state)
