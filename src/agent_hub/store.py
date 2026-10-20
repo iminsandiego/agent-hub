@@ -348,7 +348,7 @@ def _match_excerpt(text: str, terms: list[str], maximum: int = 1000) -> str:
 
 def _coverage(text: str, terms: list[str]) -> float:
     """Share of distinct query terms a record contains."""
-    lowered = text.lower()
+    lowered = text[:50000].lower()
     distinct = {term.lower() for term in terms}
     return sum(term in lowered for term in distinct) / len(distinct) if distinct else 0.0
 
@@ -822,6 +822,14 @@ class Store:
             return []
         backend = "fts5" if self.fts_enabled else "substring_fallback"
         demoted = ",".join("'" + value + "'" for value in DEMOTED)
+        texts: dict[str, str] = {}
+
+        def text_of(identifier: str) -> str:
+            # Rerank and excerpt read a record's text once; a record over 200,000
+            # characters (a huge tool output) is judged on its first 200,000.
+            if identifier not in texts:
+                texts[identifier] = con.execute("SELECT substr(text,1,200000) FROM events WHERE id=?", (identifier,)).fetchone()[0]
+            return texts[identifier]
         if self.fts_enabled:
             expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
             # Rank in the index first, then filter and reorder a generous candidate
@@ -837,20 +845,32 @@ class Store:
                     (expression, project, fetch, offset) if scoped else (expression, fetch, offset)).fetchall()
 
             def keep(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+                # One lookup per page, not per candidate (a page is up to 1,000 rows).
+                events = [row["item_id"] for row in rows if row["item_type"] == "event"]
+                memories = [row["item_id"] for row in rows if row["item_type"] == "memory"]
+                classes: dict[str, tuple[str | None, str | None]] = {}
+                statuses: dict[str, str] = {}
+                for chunk in range(0, len(events), 500):
+                    part = events[chunk:chunk + 500]
+                    for row in con.execute(
+                            "SELECT e.id,c.class,sc.class FROM events e LEFT JOIN event_classes c ON c.event_id=e.id "
+                            "LEFT JOIN session_classes sc ON sc.session_id=e.session_id "
+                            f"WHERE e.project=? AND e.id IN ({','.join('?' * len(part))})", (project, *part)):
+                        classes[row[0]] = (row[1], row[2])
+                for chunk in range(0, len(memories), 500):
+                    part = memories[chunk:chunk + 500]
+                    statuses.update(con.execute(
+                        f"SELECT id,status FROM memories WHERE project=? AND id IN ({','.join('?' * len(part))})", (project, *part)).fetchall())
                 kept = []
                 for candidate in rows:
                     if candidate["item_type"] == "memory":
-                        status = con.execute("SELECT status FROM memories WHERE project=? AND id=?", (project, candidate["item_id"])).fetchone()
-                        if status and status[0] in ("candidate", "active"):
+                        if statuses.get(candidate["item_id"]) in ("candidate", "active"):
                             kept.append({"item_type": "memory", "item_id": candidate["item_id"], "rank": candidate["rank"], "class": None})
                         continue
-                    classes = con.execute(
-                        "SELECT c.class,sc.class FROM events e LEFT JOIN event_classes c ON c.event_id=e.id "
-                        "LEFT JOIN session_classes sc ON sc.session_id=e.session_id WHERE e.id=? AND e.project=?",
-                        (candidate["item_id"], project)).fetchone()
-                    if classes is None or classes[0] in UNSEARCHED:
+                    found = classes.get(candidate["item_id"])
+                    if found is None or found[0] in UNSEARCHED:
                         continue  # another project's record, or bookkeeping/metadata
-                    own, session = classes[0], classes[1]
+                    own, session = found
                     kept.append({"item_type": "event", "item_id": candidate["item_id"], "rank": candidate["rank"],
                                  "class": session if session == DERIVED else own or session})
                 return kept
@@ -877,8 +897,7 @@ class Store:
             if len(terms) > 1:
                 for match in matches[:300]:
                     if match["item_type"] == "event":
-                        text = con.execute("SELECT text FROM events WHERE id=?", (match["item_id"],)).fetchone()[0]
-                        match["rank"] *= 1 + _coverage(text, terms)
+                        match["rank"] *= 1 + _coverage(text_of(match["item_id"]), terms)
             # Injected and derived records follow the conversation's own; a tool's
             # call or output is weighted down a little (bm25 ranks are negative).
             matches.sort(key=lambda m: (m["class"] in DEMOTED, m["rank"] * (0.75 if m["class"] == TOOL else 1.0)))
@@ -904,9 +923,10 @@ class Store:
                 "retrieval": backend, "score": float(match["rank"]), "trust": "untrusted_historical_data",
             }
             if match["item_type"] == "event":
-                event = con.execute("SELECT * FROM events WHERE project=? AND id=?", (project, match["item_id"])).fetchone()
+                event = con.execute("SELECT id,role,sequence,session_id,source_timestamp FROM events WHERE project=? AND id=?",
+                                    (project, match["item_id"])).fetchone()
                 base.update({
-                    "excerpt": _match_excerpt(event["text"], terms), "event_id": event["id"], "role": event["role"],
+                    "excerpt": _match_excerpt(text_of(event["id"]), terms), "event_id": event["id"], "role": event["role"],
                     "sequence": event["sequence"], "session_id": event["session_id"], "ref": f"{event['sequence']}+1",
                     "timestamp": event["source_timestamp"], "source_event_ids": [event["id"]],
                     "evidence": [{"event_id": event["id"], "session_id": event["session_id"], "sequence": event["sequence"]}],
@@ -1412,7 +1432,8 @@ class Store:
                 "SELECT id FROM memories WHERE project=? AND status='active' ORDER BY updated_at DESC,id LIMIT 1000", (project,)
             )] if "notes" in wanted else []
             all_active = con.execute("SELECT count(*) FROM memories WHERE project=? AND status='active'", (project,)).fetchone()[0] if "notes" in wanted else 0
-            search_hits = self._search(con, project, query, 60) if query and ("matches" in wanted or "notes" in wanted) else []
+            # About twenty match lines fit a hook's 9,500 characters; forty leave room for grouping by chat.
+            search_hits = self._search(con, project, query, 40 if budget_chars <= 20000 else 120) if query and ("matches" in wanted or "notes" in wanted) else []
             preferred = [hit["id"] for hit in search_hits if hit["type"] == "memory" and hit["status"] == "active"]
             ordered_ids = list(dict.fromkeys([*preferred, *ids])) if "notes" in wanted else []
             header = CONTEXT_HEADER
