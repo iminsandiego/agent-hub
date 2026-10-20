@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .classify import (BOOKKEEPING, CLASSIFIER_VERSION, DEMOTED, DERIVED, TITLE, TOOL, UNSEARCHED, chat_title,
+                       classify_event, classify_session, excluded_session)
 from .tree import SUMMARY_BYTES, event_source, make_leaf, merge_nodes, node_id
 from .tree import node_id as node_id_for
 
@@ -155,6 +157,33 @@ CREATE TABLE IF NOT EXISTS erased_sequences (
 );
 CREATE TABLE IF NOT EXISTS privacy_revisions (
     project TEXT PRIMARY KEY REFERENCES projects(id), revision INTEGER NOT NULL DEFAULT 0
+);
+-- Derived from the archive by classify.py: a rebuild recomputes them.
+CREATE TABLE IF NOT EXISTS event_classes (
+    event_id TEXT PRIMARY KEY, project TEXT NOT NULL, class TEXT NOT NULL,
+    FOREIGN KEY(event_id, project) REFERENCES events(id, project)
+);
+CREATE TABLE IF NOT EXISTS session_classes (
+    session_id TEXT PRIMARY KEY, project TEXT NOT NULL, class TEXT NOT NULL,
+    FOREIGN KEY(session_id, project) REFERENCES sessions(id, project)
+);
+-- One row per chat: its name, its opening request and its newest position, so
+-- listing recent chats never scans a chat's records.
+CREATE TABLE IF NOT EXISTS session_index (
+    session_id TEXT PRIMARY KEY, project TEXT NOT NULL, title TEXT, title_source TEXT,
+    opening INTEGER, last INTEGER,
+    FOREIGN KEY(session_id, project) REFERENCES sessions(id, project)
+);
+CREATE INDEX IF NOT EXISTS session_index_last ON session_index(project, last);
+-- Sessions the server does not archive (classify.excluded_session), remembered
+-- because only a session's first record says what it is.
+CREATE TABLE IF NOT EXISTS excluded_sessions (
+    session_id TEXT PRIMARY KEY, project TEXT NOT NULL REFERENCES projects(id), reason TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS excluded_sessions_project ON excluded_sessions(project);
+CREATE TABLE IF NOT EXISTS derived_versions (
+    project TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, version INTEGER NOT NULL,
+    PRIMARY KEY(project, name)
 )
 """
 
@@ -197,6 +226,18 @@ CONTEXT_HEADER = (
     "One record per line. A span reads \"lo+n | dates (UTC) | text\": n records from position lo, "
     "in capture order. memory_zoom(\"lo+n\") opens a span into its halves; \"lo+1\" is one original record.\n"
 )
+CHATS_TITLE = "## Recent chats, newest first (each line starts at the chat's opening request)\n"
+MATCHES_TITLE = "## Records matching the task, best first, grouped by chat\n"
+CONTEXT_SECTIONS = ("notes", "matches", "chats", "history")
+# Common words carry no topic; dropping them keeps a whole prompt usable as a query.
+_STOPWORDS = frozenset("""
+a about above after again all also am an and any are as at be because been before being below between both but by
+can could did do does doing done down during each few for from further get got had has have having he her here hers him
+his how i if im in into is it its itself just let lets like make me more most my myself need no nor not now of off ok okay
+on once only or other our ours out over own please same she should so some such than that thats the their theirs them
+then there these they this those through to too under until up us use very want was we were what when where which
+while who whom why will with would you your yours yourself
+""".split())
 HISTORY_TITLE = "## History, oldest first (recent spans in more detail)\n"
 _LINE_BREAKS = re.compile(r"\s*[\r\n\u2028\u2029\x85]+\s*")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -281,6 +322,20 @@ def _when(first: str | None, last: str | None) -> str:
 
 def _excerpt(text: str, maximum: int = 1000) -> str:
     return text if len(text) <= maximum else text[: max(0, maximum - 1)] + "…"
+
+
+def _match_excerpt(text: str, terms: list[str], maximum: int = 1000) -> str:
+    """An excerpt around the first matched term, so a match deep in a long record shows."""
+    if len(text) <= maximum:
+        return text
+    lowered = text.lower()
+    found = [index for index in (lowered.find(term.lower()) for term in terms) if index >= 0]
+    if not found:
+        return _excerpt(text, maximum)
+    start = max(0, min(found) - maximum // 4)
+    end = min(len(text), start + maximum - 2)
+    start = max(0, end - (maximum - 2))
+    return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
 
 
 class Store:
@@ -494,6 +549,20 @@ class Store:
                 "SELECT * FROM sessions WHERE project=? AND id=?", (project, internal_session)
             ).fetchone()
             now = _now()
+            excluded = con.execute("SELECT reason FROM excluded_sessions WHERE session_id=?", (internal_session,)).fetchone()
+            if excluded is None and existing is None:
+                reason = excluded_session(client, metadata or {}, normalized[0][3] if normalized else None)
+                named = chat_title(normalized[0][2], normalized[0][3]) if normalized else None
+                if reason is None and named and named[2] and con.execute(
+                        "SELECT 1 FROM excluded_sessions WHERE session_id=?", (named[2],)).fetchone():
+                    reason = "title of an excluded session"
+                if reason:
+                    con.execute("INSERT INTO excluded_sessions VALUES(?,?,?,?)", (internal_session, project, reason, now))
+                    excluded = (reason,)
+            if excluded is not None:
+                return {"session_id": internal_session, "inserted": 0, "duplicates": 0, "event_ids": [],
+                        "total_events": 0, "discarded": len(events), "excluded": excluded[0],
+                        "project_total_events": con.execute("SELECT count(*) FROM events WHERE project=?", (project,)).fetchone()[0]}
             if existing is None:
                 con.execute(
                     "INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?)",
@@ -503,8 +572,15 @@ class Store:
                 # source_path records where a file was first seen; a moved or archived
                 # transcript is the same session, so its path is not compared.
                 raise ValueError("Session metadata conflicts with the archived original")
+            if existing is None:
+                session_class = classify_session(client, metadata or {}, normalized[0][3] if normalized else None)
+                if session_class:
+                    con.execute("INSERT INTO session_classes VALUES(?,?,?)", (internal_session, project, session_class))
+            else:
+                row = con.execute("SELECT class FROM session_classes WHERE session_id=?", (internal_session,)).fetchone()
+                session_class = row[0] if row else None
             next_sequence = project_row["next_sequence"]
-            inserted = duplicates = 0
+            inserted = duplicates = discarded = 0
             event_ids: list[str] = []
             for external_id, role, text, raw, timestamp, payload_hash in normalized:
                 original = con.execute(
@@ -518,6 +594,10 @@ class Store:
                     event_ids.append(original["id"])
                     duplicates += 1
                     continue
+                event_class = classify_event(role, text, raw)
+                if event_class == BOOKKEEPING:
+                    discarded += 1  # no content of its own (classify.py); a replay discards it again
+                    continue
                 identifier = "e_" + uuid.uuid4().hex
                 con.execute(
                     "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -529,7 +609,11 @@ class Store:
                         "INSERT INTO history_fts(project,item_type,item_id,content) VALUES(?,'event',?,?)",
                         (project, identifier, text),
                     )
-                self._append_tree(con, project, next_sequence, text, identifier, role)
+                if event_class:
+                    con.execute("INSERT INTO event_classes VALUES(?,?,?)", (identifier, project, event_class))
+                self._index_record(con, project, internal_session, next_sequence, role, text, raw, event_class)
+                self._append_tree(con, project, next_sequence, text, identifier, role,
+                                  hidden=bool(event_class or session_class))
                 next_sequence += 1
                 inserted += 1
                 event_ids.append(identifier)
@@ -542,7 +626,7 @@ class Store:
                 "SELECT count(*) FROM events WHERE project=? AND session_id=?", (project, internal_session)
             ).fetchone()[0]
             return {
-                "session_id": internal_session, "inserted": inserted, "duplicates": duplicates,
+                "session_id": internal_session, "inserted": inserted, "duplicates": duplicates, "discarded": discarded,
                 "event_ids": event_ids, "total_events": total, "project_total_events": con.execute("SELECT count(*) FROM events WHERE project=?", (project,)).fetchone()[0],
             }
 
@@ -592,6 +676,9 @@ class Store:
             report["summaries_reset"] = reset
         self._erase_tree(con, project, erased)
         con.execute("INSERT OR IGNORE INTO erased_sequences SELECT project,sequence FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
+        con.execute("DELETE FROM event_classes WHERE project=? AND event_id IN (SELECT id FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids))", (project, project))
+        con.execute("DELETE FROM session_classes WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
+        con.execute("DELETE FROM session_index WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
         con.execute("DELETE FROM events WHERE project=? AND session_id IN (SELECT id FROM purge_ids)", (project,))
         con.execute("DELETE FROM sessions WHERE project=? AND id IN (SELECT id FROM purge_ids)", (project,))
         con.execute("INSERT INTO privacy_revisions VALUES(?,1) ON CONFLICT(project) DO UPDATE SET revision=revision+1", (project,))
@@ -708,33 +795,73 @@ class Store:
     @staticmethod
     def _terms(query: str) -> list[str]:
         _text(query, "query", empty=True)
-        return list(dict.fromkeys(re.findall(r"\w+", query, re.UNICODE)))[:32]
+        words = list(dict.fromkeys(re.findall(r"\w+", query, re.UNICODE)))
+        kept = [word for word in words if word.lower() not in _STOPWORDS and (len(word) > 1 or not word.isascii())]
+        return (kept or words)[:32]
 
     def _search(self, con: sqlite3.Connection, project: str, query: str, limit: int) -> list[dict[str, Any]]:
+        """Ranked matches: bookkeeping is not searched; injected and derived records
+        (classify.py) follow the conversation's own records."""
         terms = self._terms(query)
         if not terms:
             return []
         backend = "fts5" if self.fts_enabled else "substring_fallback"
+        demoted = ",".join("'" + value + "'" for value in DEMOTED)
         if self.fts_enabled:
             expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
-            matches = con.execute(
-                "SELECT h.item_type,h.item_id,bm25(history_fts) AS rank FROM history_fts h "
-                "LEFT JOIN memories m ON h.item_type='memory' AND m.id=h.item_id AND m.project=h.project "
-                "WHERE history_fts MATCH ? AND h.project=? "
-                "AND (h.item_type='event' OR m.status IN ('candidate','active')) "
-                "ORDER BY rank,h.item_id LIMIT ?", (expression, project, limit),
-            ).fetchall()
+            # Rank in the index first, then filter and reorder a generous candidate
+            # set. The project column is not indexed, so filtering on it inside the
+            # query reads every match before ranking (seconds when a common word
+            # matches much of the archive); it is checked per candidate instead.
+            fetch = max(1000, limit * 20)
+
+            def candidates(scoped: bool) -> list[sqlite3.Row]:
+                return con.execute(
+                    "SELECT h.item_type,h.item_id,bm25(history_fts) AS rank FROM history_fts h "
+                    "WHERE history_fts MATCH ?" + (" AND h.project=?" if scoped else "") + " ORDER BY rank LIMIT ?",
+                    (expression, project, fetch) if scoped else (expression, fetch)).fetchall()
+
+            def keep(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+                kept = []
+                for candidate in rows:
+                    if candidate["item_type"] == "memory":
+                        status = con.execute("SELECT status FROM memories WHERE project=? AND id=?", (project, candidate["item_id"])).fetchone()
+                        if status and status[0] in ("candidate", "active"):
+                            kept.append({"item_type": "memory", "item_id": candidate["item_id"], "rank": candidate["rank"], "class": None})
+                        continue
+                    classes = con.execute(
+                        "SELECT c.class,sc.class FROM events e LEFT JOIN event_classes c ON c.event_id=e.id "
+                        "LEFT JOIN session_classes sc ON sc.session_id=e.session_id WHERE e.id=? AND e.project=?",
+                        (candidate["item_id"], project)).fetchone()
+                    if classes is None or classes[0] in UNSEARCHED:
+                        continue  # another project's record, or bookkeeping/metadata
+                    own, session = classes[0], classes[1]
+                    kept.append({"item_type": "event", "item_id": candidate["item_id"], "rank": candidate["rank"],
+                                 "class": session if session == DERIVED else own or session})
+                return kept
+
+            rows = candidates(False)
+            matches = keep(rows)
+            if len(rows) == fetch and len(matches) < limit:
+                matches = keep(candidates(True))  # other projects crowded this one out
+            # Injected and derived records follow the conversation's own; a tool's
+            # call or output is weighted down a little (bm25 ranks are negative).
+            matches.sort(key=lambda m: (m["class"] in DEMOTED, m["rank"] * (0.75 if m["class"] == TOOL else 1.0)))
+            matches = matches[:limit]
         else:
             # The fallback is deliberately labelled.  Bound, literal substring
             # searches are less expressive than FTS, but never execute user SQL.
             clauses = " OR ".join("content LIKE ? ESCAPE '\\'" for _ in terms)
             patterns = ["%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for term in terms]
-            matches = con.execute(
-                "SELECT * FROM (SELECT 'event' AS item_type,id AS item_id,text AS content,0.0 AS rank "
-                "FROM events WHERE project=? UNION ALL SELECT 'memory',id,statement,0.0 FROM memories "
+            matches = [dict(row) for row in con.execute(
+                "SELECT * FROM (SELECT 'event' AS item_type,e.id AS item_id,e.text AS content,0.0 AS rank,"
+                f"CASE WHEN sc.class='{DERIVED}' THEN sc.class ELSE coalesce(c.class,sc.class) END AS class FROM events e "
+                "LEFT JOIN event_classes c ON c.event_id=e.id LEFT JOIN session_classes sc ON sc.session_id=e.session_id "
+                f"WHERE e.project=? AND (c.class IS NULL OR c.class NOT IN ('{BOOKKEEPING}','{UNSEARCHED[1]}')) "
+                "UNION ALL SELECT 'memory',id,statement,0.0,NULL FROM memories "
                 "WHERE project=? AND status IN ('candidate','active')) WHERE (" + clauses + ") "
-                "ORDER BY item_type,item_id LIMIT ?", [project, project, *patterns, limit],
-            ).fetchall()
+                f"ORDER BY coalesce(class IN ({demoted}),0),item_type,item_id LIMIT ?", [project, project, *patterns, limit],
+            )]
         results = []
         for match in matches:
             base: dict[str, Any] = {
@@ -744,10 +871,11 @@ class Store:
             if match["item_type"] == "event":
                 event = con.execute("SELECT * FROM events WHERE project=? AND id=?", (project, match["item_id"])).fetchone()
                 base.update({
-                    "excerpt": _excerpt(event["text"]), "event_id": event["id"], "role": event["role"],
+                    "excerpt": _match_excerpt(event["text"], terms), "event_id": event["id"], "role": event["role"],
                     "sequence": event["sequence"], "session_id": event["session_id"], "ref": f"{event['sequence']}+1",
                     "timestamp": event["source_timestamp"], "source_event_ids": [event["id"]],
                     "evidence": [{"event_id": event["id"], "session_id": event["session_id"], "sequence": event["sequence"]}],
+                    "class": match["class"], "ranked_after_conversation": match["class"] in DEMOTED,
                 })
             else:
                 memory = self._memory(con, project, match["item_id"])
@@ -891,8 +1019,9 @@ class Store:
              node.get("event_id"), int(node["original_verbatim"])),
         )
 
-    def _append_tree(self, con: sqlite3.Connection, project: str, sequence: int, text: str, event_id: str, role: str) -> None:
-        current = make_leaf(project, sequence, text, event_id=event_id, role=role)
+    def _append_tree(self, con: sqlite3.Connection, project: str, sequence: int, text: str, event_id: str, role: str,
+                     *, hidden: bool = False) -> None:
+        current = make_leaf(project, sequence, text, event_id=event_id, role=role, hidden=hidden)
         self._insert_node(con, project, current)
         span = 1
         while current["lo"] % (2 * span) == span:
@@ -970,11 +1099,16 @@ class Store:
         project_row = self._project(con, project)
         con.execute("DELETE FROM tree_nodes WHERE project=?", (project,))
         count = actual = 0
-        rows = con.execute("SELECT sequence,text,id,role FROM events WHERE project=? UNION ALL SELECT sequence,'Excluded source omitted',NULL,'system' FROM erased_sequences WHERE project=? ORDER BY sequence", (project, project))
+        rows = con.execute(
+            "SELECT e.sequence AS sequence,e.text AS text,e.id AS id,e.role AS role,"
+            "(c.class IS NOT NULL OR s.class IS NOT NULL) AS hidden FROM events e "
+            "LEFT JOIN event_classes c ON c.event_id=e.id LEFT JOIN session_classes s ON s.session_id=e.session_id "
+            "WHERE e.project=? UNION ALL SELECT sequence,'Excluded source omitted',NULL,'system',0 "
+            "FROM erased_sequences WHERE project=? ORDER BY sequence", (project, project))
         for event in rows:
             if event["sequence"] != count:
                 raise RuntimeError("Archived sequence is missing an event or erasure marker")
-            self._append_tree(con, project, count, event["text"], event["id"], event["role"])
+            self._append_tree(con, project, count, event["text"], event["id"], event["role"], hidden=bool(event["hidden"]))
             count += 1
             actual += int(event["id"] is not None)
         if count != project_row["next_sequence"]:
@@ -1024,71 +1158,225 @@ class Store:
         Without ``apply`` nothing is written.
         """
         with self._connection(write=apply) as con:
-            project_row = self._project(con, project)
-            sessions = {row["id"]: row["created_at"] for row in con.execute("SELECT id,created_at FROM sessions WHERE project=?", (project,))}
-            rows = con.execute("SELECT id,session_id,sequence,source_timestamp FROM events WHERE project=? ORDER BY sequence", (project,)).fetchall()
-            first: dict[str, datetime] = {}
-            for row in rows:
-                moment = _moment(row["source_timestamp"])
-                if moment is not None and row["session_id"] not in first:
-                    first[row["session_id"]] = moment
-            running: dict[str, datetime] = {}
-            keyed = []
-            for row in rows:
-                session = row["session_id"]
-                moment = _moment(row["source_timestamp"])
-                base = running.get(session) or first.get(session) or _moment(sessions.get(session)) or datetime.min.replace(tzinfo=timezone.utc)
-                running[session] = max(base, moment) if moment is not None else base
-                keyed.append((running[session], row["sequence"], row["id"]))
-            keyed.sort()
-            mapping = {identifier: index for index, (_, _, identifier) in enumerate(keyed)}
-            old = {row["id"]: row["sequence"] for row in rows}
-            moved = sum(1 for identifier, position in mapping.items() if old[identifier] != position)
-            gaps = con.execute("SELECT count(*) FROM erased_sequences WHERE project=?", (project,)).fetchone()[0]
-            model_summaries = con.execute("SELECT count(*) FROM tree_nodes WHERE project=? AND mode='semantic' "
-                                          "AND summary_model IS NOT NULL AND summary_model!='builtin-concat'", (project,)).fetchone()[0]
-            result = {"project": project, "applied": apply, "events": len(rows), "sessions": len(sessions),
-                      "moved": moved, "gap_markers_removed": gaps, "model_summaries_reset": model_summaries,
-                      "positions": {"before": project_row["next_sequence"], "after": len(rows)}}
+            return self._reorder(con, project, apply)
+
+    def _reorder(self, con: sqlite3.Connection, project: str, apply: bool) -> dict[str, Any]:
+        project_row = self._project(con, project)
+        sessions = {row["id"]: row["created_at"] for row in con.execute("SELECT id,created_at FROM sessions WHERE project=?", (project,))}
+        rows = con.execute("SELECT id,session_id,sequence,source_timestamp FROM events WHERE project=? ORDER BY sequence", (project,)).fetchall()
+        first: dict[str, datetime] = {}
+        for row in rows:
+            moment = _moment(row["source_timestamp"])
+            if moment is not None and row["session_id"] not in first:
+                first[row["session_id"]] = moment
+        running: dict[str, datetime] = {}
+        keyed = []
+        for row in rows:
+            session = row["session_id"]
+            moment = _moment(row["source_timestamp"])
+            base = running.get(session) or first.get(session) or _moment(sessions.get(session)) or datetime.min.replace(tzinfo=timezone.utc)
+            running[session] = max(base, moment) if moment is not None else base
+            keyed.append((running[session], row["sequence"], row["id"]))
+        keyed.sort()
+        mapping = {identifier: index for index, (_, _, identifier) in enumerate(keyed)}
+        old = {row["id"]: row["sequence"] for row in rows}
+        moved = sum(1 for identifier, position in mapping.items() if old[identifier] != position)
+        gaps = con.execute("SELECT count(*) FROM erased_sequences WHERE project=?", (project,)).fetchone()[0]
+        model_summaries = con.execute("SELECT count(*) FROM tree_nodes WHERE project=? AND mode='semantic' "
+                                      "AND summary_model IS NOT NULL AND summary_model!='builtin-concat'", (project,)).fetchone()[0]
+        result = {"project": project, "applied": apply, "events": len(rows), "sessions": len(sessions),
+                  "moved": moved, "gap_markers_removed": gaps, "model_summaries_reset": model_summaries,
+                  "positions": {"before": project_row["next_sequence"], "after": len(rows)}}
+        if not apply:
+            return result
+        offset = project_row["next_sequence"] + len(rows) + 1
+        con.execute("UPDATE events SET sequence=sequence+? WHERE project=?", (offset, project))
+        con.execute("CREATE TEMP TABLE reorder_map(id TEXT PRIMARY KEY, position INTEGER NOT NULL)")
+        con.executemany("INSERT INTO reorder_map VALUES(?,?)", list(mapping.items()))
+        con.execute("UPDATE events SET sequence=(SELECT position FROM reorder_map WHERE reorder_map.id=events.id) WHERE project=?", (project,))
+        con.execute("DROP TABLE reorder_map")
+        con.execute("DELETE FROM erased_sequences WHERE project=?", (project,))
+        con.execute("UPDATE projects SET next_sequence=? WHERE id=?", (len(rows), project))
+        self._refresh_session_positions(con, project)
+        # Positions changed: invalidate any worker result computed against the old ones.
+        con.execute("INSERT INTO privacy_revisions VALUES(?,1) ON CONFLICT(project) DO UPDATE SET revision=revision+1", (project,))
+        tree = self._rebuild_tree(con, project)
+        result.update({"tree_nodes": tree["nodes"],
+                       "sequence_map": {old[identifier]: position for identifier, position in mapping.items()}})
+        return result
+
+    def prune(self, project: str, *, apply: bool = False) -> dict[str, Any]:
+        """Delete what has no content of its own, then close the gaps.
+
+        Removes bookkeeping records (classify.py) and every record of a session
+        ``excluded_session`` names (Codex's approval reviewer), unless a note
+        cites the record. Excluded sessions are remembered, so a later capture
+        or a replay after a lost checkpoint does not bring them back, and
+        bookkeeping is discarded at ingest. Positions are then renumbered as by
+        ``reorder_by_time`` and the tree is rebuilt. Without ``apply`` nothing
+        is written; with it, run ``VACUUM`` afterwards to return the space.
+        """
+        with self._connection(write=True) as con:
+            self._project(con, project)
+            # The deleted text is not zeroed in place (secure_delete would log a copy
+            # of every freed page, several GB): VACUUM afterwards rewrites the file
+            # without it, which the admin command does.
+            con.execute("PRAGMA secure_delete=OFF")
+            con.execute("SAVEPOINT prune")
+            version = con.execute("SELECT version FROM derived_versions WHERE project=? AND name='classifier'", (project,)).fetchone()
+            # Current rules first (rebuild does this too: skipped when already current).
+            classes = self._reclassify(con, project) if version is None or version[0] != CLASSIFIER_VERSION else {}
+            excluded: dict[str, str] = {}
+            for session in con.execute("SELECT id,client,metadata_json FROM sessions WHERE project=?", (project,)).fetchall():
+                first = con.execute("SELECT text,raw FROM events WHERE project=? AND session_id=? ORDER BY sequence LIMIT 1",
+                                    (project, session["id"])).fetchone()
+                reason = excluded_session(session["client"], json.loads(session["metadata_json"]), first["raw"] if first else None)
+                if reason:
+                    excluded[session["id"]] = reason
+            for session, text in con.execute("SELECT e.session_id,e.text FROM events e JOIN session_classes c ON c.session_id=e.session_id "
+                                             f"WHERE e.project=? AND c.class='{TITLE}'", (project,)).fetchall():
+                named = chat_title(text, "")
+                if named and named[2] in excluded:
+                    excluded[session] = "title of an excluded session"
+            con.execute("CREATE TEMP TABLE prune_sessions(id TEXT PRIMARY KEY)")
+            con.executemany("INSERT INTO prune_sessions VALUES(?)", [(identifier,) for identifier in excluded])
+            con.execute("CREATE TEMP TABLE prune_events(id TEXT PRIMARY KEY)")
+            con.execute(
+                "INSERT INTO prune_events SELECT e.id FROM events e LEFT JOIN event_classes c ON c.event_id=e.id "
+                f"WHERE e.project=? AND (c.class='{BOOKKEEPING}' OR e.session_id IN (SELECT id FROM prune_sessions)) "
+                "AND NOT EXISTS (SELECT 1 FROM memory_sources m WHERE m.event_id=e.id)", (project,))
+            records, size = con.execute("SELECT count(*),coalesce(sum(length(text)+length(raw)),0) FROM events "
+                                        "WHERE id IN (SELECT id FROM prune_events)").fetchone()
+            kept_for_notes = con.execute(
+                "SELECT count(*) FROM events e LEFT JOIN event_classes c ON c.event_id=e.id "
+                f"WHERE e.project=? AND (c.class='{BOOKKEEPING}' OR e.session_id IN (SELECT id FROM prune_sessions)) "
+                "AND EXISTS (SELECT 1 FROM memory_sources m WHERE m.event_id=e.id)", (project,)).fetchone()[0]
+            total, total_size = con.execute("SELECT count(*),coalesce(sum(length(text)+length(raw)),0) FROM events WHERE project=?",
+                                            (project,)).fetchone()
+            reasons: dict[str, int] = {}
+            for reason in excluded.values():
+                reasons[reason] = reasons.get(reason, 0) + 1
+            result: dict[str, Any] = {
+                "project": project, "applied": apply, "records": total, "records_removed": records,
+                "records_kept": total - records, "bytes_removed": size, "bytes_before": total_size,
+                "sessions_excluded": reasons, "kept_because_a_note_cites_them": kept_for_notes, "classes": classes}
             if not apply:
+                con.execute("ROLLBACK TO prune")  # also drops the temporary tables
+                con.execute("RELEASE prune")
                 return result
-            offset = project_row["next_sequence"] + len(rows) + 1
-            con.execute("UPDATE events SET sequence=sequence+? WHERE project=?", (offset, project))
-            con.execute("CREATE TEMP TABLE reorder_map(id TEXT PRIMARY KEY, position INTEGER NOT NULL)")
-            con.executemany("INSERT INTO reorder_map VALUES(?,?)", list(mapping.items()))
-            con.execute("UPDATE events SET sequence=(SELECT position FROM reorder_map WHERE reorder_map.id=events.id) WHERE project=?", (project,))
-            con.execute("DROP TABLE reorder_map")
-            con.execute("DELETE FROM erased_sequences WHERE project=?", (project,))
-            con.execute("UPDATE projects SET next_sequence=? WHERE id=?", (len(rows), project))
-            # Positions changed: invalidate any worker result computed against the old ones.
-            con.execute("INSERT INTO privacy_revisions VALUES(?,1) ON CONFLICT(project) DO UPDATE SET revision=revision+1", (project,))
-            tree = self._rebuild_tree(con, project)
-            result.update({"tree_nodes": tree["nodes"],
-                           "sequence_map": {old[identifier]: position for identifier, position in mapping.items()}})
+            now = _now()
+            con.executemany("INSERT OR IGNORE INTO excluded_sessions VALUES(?,?,?,?)",
+                            [(identifier, project, reason, now) for identifier, reason in excluded.items()])
+            if self.fts_enabled:
+                con.execute("DELETE FROM history_fts WHERE item_type='event' AND item_id IN (SELECT id FROM prune_events)")
+            con.execute("DELETE FROM event_classes WHERE event_id IN (SELECT id FROM prune_events)")
+            con.execute("DELETE FROM tree_nodes WHERE project=?", (project,))  # rebuilt below
+            con.execute("DELETE FROM events WHERE id IN (SELECT id FROM prune_events)")
+            emptied = "SELECT id FROM prune_sessions WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id=prune_sessions.id)"
+            for table, column in (("session_classes", "session_id"), ("session_index", "session_id"), ("sessions", "id")):
+                con.execute(f"DELETE FROM {table} WHERE {column} IN ({emptied})")
+            con.execute("DROP TABLE prune_events")
+            con.execute("DROP TABLE prune_sessions")
+            reordered = self._reorder(con, project, True)
+            con.execute("RELEASE prune")
+            if self.fts_enabled:
+                con.execute("INSERT INTO history_fts(history_fts) VALUES('optimize')")
+            result.update({"positions": reordered["positions"], "tree_nodes": reordered["tree_nodes"],
+                           "sequence_map": reordered["sequence_map"]})
             return result
 
+    def _reclassify(self, con: sqlite3.Connection, project: str) -> dict[str, int]:
+        """Recompute every record's and session's class (classify.py) from the archive."""
+        con.execute("DELETE FROM event_classes WHERE project=?", (project,))
+        con.execute("DELETE FROM session_classes WHERE project=?", (project,))
+        con.execute("DELETE FROM session_index WHERE project=?", (project,))
+        counts: dict[str, int] = {}
+        for session in con.execute("SELECT id,client,metadata_json FROM sessions WHERE project=?", (project,)).fetchall():
+            first = con.execute("SELECT raw FROM events WHERE project=? AND session_id=? ORDER BY sequence LIMIT 1",
+                                (project, session["id"])).fetchone()
+            value = classify_session(session["client"], json.loads(session["metadata_json"]), first[0] if first else None)
+            if value:
+                con.execute("INSERT INTO session_classes VALUES(?,?,?)", (session["id"], project, value))
+                counts["sessions_" + value] = counts.get("sessions_" + value, 0) + 1
+        batch: list[tuple[str, str, str]] = []
+        for row in con.execute("SELECT id,session_id,sequence,role,text,substr(raw,1,400) AS head FROM events "
+                               "WHERE project=? ORDER BY sequence", (project,)):
+            value = classify_event(row["role"], row["text"], row["head"])
+            if value:
+                batch.append((row["id"], project, value))
+                counts["records_" + value] = counts.get("records_" + value, 0) + 1
+            raw = row["head"]
+            if len(raw) == 400 and row["text"].startswith("Unsupported Claude record ("):
+                raw = con.execute("SELECT raw FROM events WHERE id=?", (row["id"],)).fetchone()[0]
+            self._index_record(con, project, row["session_id"], row["sequence"], row["role"], row["text"], raw, value)
+            if len(batch) >= 5000:
+                con.executemany("INSERT INTO event_classes VALUES(?,?,?)", batch)
+                batch.clear()
+        con.executemany("INSERT INTO event_classes VALUES(?,?,?)", batch)
+        con.execute("INSERT INTO derived_versions VALUES(?,?,?) ON CONFLICT(project,name) DO UPDATE SET version=excluded.version",
+                    (project, "classifier", CLASSIFIER_VERSION))
+        return counts
+
+    @staticmethod
+    def _refresh_session_positions(con: sqlite3.Connection, project: str) -> None:
+        """Recompute each chat's newest and opening positions after a renumbering."""
+        con.execute("UPDATE session_index SET last=(SELECT max(sequence) FROM events e WHERE e.project=session_index.project "
+                    "AND e.session_id=session_index.session_id) WHERE project=?", (project,))
+        con.execute("UPDATE session_index SET opening=(SELECT min(e.sequence) FROM events e LEFT JOIN event_classes c ON c.event_id=e.id "
+                    "WHERE e.project=session_index.project AND e.session_id=session_index.session_id AND e.role='user' "
+                    "AND c.class IS NULL) WHERE project=?", (project,))
+
+    @staticmethod
+    def _index_record(con: sqlite3.Connection, project: str, session: str, sequence: int, role: str, text: str,
+                      raw: str, event_class: str | None) -> None:
+        """Keep session_index current for one record (in position order)."""
+        con.execute("INSERT INTO session_index(session_id,project,last) VALUES(?,?,?) ON CONFLICT(session_id) "
+                    "DO UPDATE SET last=max(coalesce(last,-1),excluded.last)", (session, project, sequence))
+        if role == "user" and event_class is None:
+            con.execute("UPDATE session_index SET opening=? WHERE session_id=? AND (opening IS NULL OR opening>?)",
+                        (sequence, session, sequence))
+        named = chat_title(text, raw) if role == "system" else None
+        if named:
+            title, source, target = named
+            target = target or session
+            if target != session and not con.execute("SELECT 1 FROM sessions WHERE id=? AND project=?", (target, project)).fetchone():
+                return
+            con.execute("INSERT INTO session_index(session_id,project) VALUES(?,?) ON CONFLICT(session_id) DO NOTHING", (target, project))
+            # A user's own rename outranks a generated title; otherwise the latest wins.
+            con.execute("UPDATE session_index SET title=?,title_source=? WHERE session_id=? "
+                        "AND (title_source IS NULL OR title_source!='custom' OR ?='custom')", (title, source, target, source))
+
     def rebuild_tree(self, project: str) -> dict[str, Any]:
+        """Reclassify the project's records, then rebuild its tree from them."""
         with self._connection(write=True) as con:
-            return self._rebuild_tree(con, project)
+            self._project(con, project)
+            classes = self._reclassify(con, project)
+            return {**self._rebuild_tree(con, project), "classes": classes}
 
-    def context(self, project: str, budget_chars: int = 12000, query: str | None = None) -> dict[str, Any]:
-        """A bounded, line-per-record pack: active notes, query matches, then history.
+    def context(self, project: str, budget_chars: int = 12000, query: str | None = None,
+                sections: list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+        """A bounded, line-per-record pack: active notes, query matches, recent chats, then history.
 
+        ``sections`` limits the pack to some of ``notes``, ``matches`` (needs a
+        query), ``chats`` and ``history``; a prompt hook asks for matches only.
         Every line the pack contains starts with ``note ``, a ``lo+n`` span
         reference, ``## `` or a fixed header line. Record text has its line breaks
         flattened, so a captured string cannot start a line of its own and pose as
         a note, a heading or an instruction outside its record.
         """
         _limit(budget_chars, "budget_chars", minimum=0, maximum=1000000)
+        wanted = tuple(CONTEXT_SECTIONS if sections is None else sections)
+        if not wanted or any(section not in CONTEXT_SECTIONS for section in wanted):
+            raise ValueError("sections must name some of: " + ", ".join(CONTEXT_SECTIONS))
         with self._read() as con:
             project_row = self._project(con, project)
             ids = [row["id"] for row in con.execute(
                 "SELECT id FROM memories WHERE project=? AND status='active' ORDER BY updated_at DESC,id LIMIT 1000", (project,)
-            )]
-            all_active = con.execute("SELECT count(*) FROM memories WHERE project=? AND status='active'", (project,)).fetchone()[0]
-            search_hits = self._search(con, project, query, 30) if query else []
+            )] if "notes" in wanted else []
+            all_active = con.execute("SELECT count(*) FROM memories WHERE project=? AND status='active'", (project,)).fetchone()[0] if "notes" in wanted else 0
+            search_hits = self._search(con, project, query, 60) if query and ("matches" in wanted or "notes" in wanted) else []
             preferred = [hit["id"] for hit in search_hits if hit["type"] == "memory" and hit["status"] == "active"]
-            ordered_ids = list(dict.fromkeys([*preferred, *ids]))
+            ordered_ids = list(dict.fromkeys([*preferred, *ids])) if "notes" in wanted else []
             header = CONTEXT_HEADER
             notes: list[tuple[str, str]] = []
             excerpted_memory = False
@@ -1100,10 +1388,9 @@ class Store:
                 sources = f"{count} source" + ("" if count == 1 else "s") if count else "unsourced"
                 statement = _flat(_excerpt(memory["statement"], 1400)) + (" [statement truncated]" if statement_truncated else "")
                 notes.append((identifier, f"note {identifier} | {memory['kind']} | {sources} | {statement}\n"))
-            matches = [(hit["id"], f"{hit['sequence']}+1 | {_when(hit['timestamp'], hit['timestamp'])} | "
-                                   f"{hit['role']}: {_flat(hit['excerpt'])}\n")
-                       for hit in search_hits if hit["type"] == "event"]
-            included: dict[str, list[str]] = {"memory": [], "event": [], "node": []}
+            labels: dict[str, str] = {}
+            matches = self._match_lines(con, project, search_hits, labels) if "matches" in wanted else []
+            included: dict[str, list[str]] = {"memory": [], "event": [], "node": [], "session": []}
             pieces = [header]
             used, used_bytes = len(header), len(header.encode("utf-8"))
             byte_budget = CONTEXT_MAX_BYTES
@@ -1131,23 +1418,29 @@ class Store:
                 truncated = True
             else:
                 take("## Active notes (reviewed context, not proof)\n", "memory", notes)
-                # Matches may use half of what is left, so history always has room.
-                take("## Records matching the task\n", "event", matches, 0.5)
-                # History fills what is left: the whole range first, then finer
-                # detail for recent spans while it still fits.
-                title = HISTORY_TITLE
-                lines: dict[str, str] = {}
-                frontier, covered = self._budget_frontier(
-                    con, project, project_row["next_sequence"], budget_chars - used - len(title),
-                    byte_budget - used_bytes - len(title.encode("utf-8")), lines)
-                truncated = truncated or not covered
-                if frontier:
-                    pieces.append(title)
-                    used += len(title)
-                for node in frontier:
-                    pieces.append(lines[node["id"]])
-                    included["node"].append(node["id"])
-                    used += len(lines[node["id"]])
+                later = [section for section in ("chats", "history") if section in wanted]
+                # Matches may use half of what is left when more sections follow.
+                take(MATCHES_TITLE, "event", matches, 0.5 if later else 1.0)
+                if "chats" in wanted:
+                    take(CHATS_TITLE, "session", self._recent_chat_lines(con, project, labels), 0.4 if "history" in wanted else 1.0)
+                if "history" in wanted:
+                    # History fills what is left: the whole range first, then finer
+                    # detail for recent spans while it still fits.
+                    title = HISTORY_TITLE
+                    lines: dict[str, str] = {}
+                    frontier, covered = self._budget_frontier(
+                        con, project, project_row["next_sequence"], budget_chars - used - len(title),
+                        byte_budget - used_bytes - len(title.encode("utf-8")), lines)
+                    truncated = truncated or not covered
+                    if any(lines[node["id"]] for node in frontier):
+                        pieces.append(title)
+                        used += len(title)
+                    for node in frontier:
+                        if not lines[node["id"]]:
+                            continue
+                        pieces.append(lines[node["id"]])
+                        included["node"].append(node["id"])
+                        used += len(lines[node["id"]])
                 text = "".join(pieces)
                 if truncated:
                     marker = "[Context truncated; search or zoom for more.]\n"
@@ -1156,9 +1449,54 @@ class Store:
             return {
                 "project": project, "text": text, "char_count": len(text), "budget_chars": budget_chars,
                 "truncated": truncated, "active_memory_ids": included["memory"],
-                "event_ids": included["event"], "node_ids": included["node"],
+                "event_ids": included["event"], "node_ids": included["node"], "session_ids": included["session"],
                 "total_events": con.execute("SELECT count(*) FROM events WHERE project=?", (project,)).fetchone()[0], "trust": "untrusted_historical_data",
             }
+
+    def _chat_label(self, con: sqlite3.Connection, project: str, session_id: str, labels: dict[str, str]) -> str:
+        """A chat's title when one was captured, then its opening request; cached in ``labels``."""
+        if session_id not in labels:
+            row = con.execute("SELECT title,opening FROM session_index WHERE session_id=? AND project=?", (session_id, project)).fetchone()
+            title = (row["title"] or "") if row else ""
+            opening = con.execute("SELECT text FROM events WHERE project=? AND sequence=?", (project, row["opening"])).fetchone() \
+                if row and row["opening"] is not None else None
+            label = _flat(title + (" — " if title and opening else "") + (opening[0] if opening else ""))
+            labels[session_id] = _excerpt(label, 200) if label else "(no request text)"
+        return labels[session_id]
+
+    def _recent_chat_lines(self, con: sqlite3.Connection, project: str, labels: dict[str, str], limit: int = 40) -> list[tuple[str, str]]:
+        """One line per recent primary chat: its opening record, dates, client and title or request.
+
+        Newest by last position (source-time order after a reorder; new captures
+        append), not by ingest time, which a backfill makes look recent.
+        """
+        rows = []
+        for chat in con.execute(
+                "SELECT i.session_id,i.opening,s.client FROM session_index i JOIN sessions s ON s.id=i.session_id "
+                "LEFT JOIN session_classes c ON c.session_id=i.session_id "
+                "WHERE i.project=? AND i.opening IS NOT NULL AND c.class IS NULL ORDER BY i.last DESC LIMIT ?",
+                (project, limit)).fetchall():
+            edges = [con.execute("SELECT source_timestamp FROM events WHERE project=? AND session_id=? AND source_timestamp IS NOT NULL "
+                                 "ORDER BY sequence " + order + " LIMIT 1", (project, chat["session_id"])).fetchone() for order in ("ASC", "DESC")]
+            when = _when(edges[0] and edges[0][0], edges[1] and edges[1][0])
+            label = self._chat_label(con, project, chat["session_id"], labels)
+            rows.append((chat["session_id"], f"{chat['opening']}+1 | {when} | {chat['client']} | {label}\n"))
+        return rows
+
+    def _match_lines(self, con: sqlite3.Connection, project: str, hits: list[dict[str, Any]], labels: dict[str, str]) -> list[tuple[str, str]]:
+        """Event hits as lines, at most two per chat, each naming its chat."""
+        per_chat: dict[str, int] = {}
+        rows = []
+        for hit in hits:
+            if hit["type"] != "event" or hit.get("class") == TITLE:
+                continue  # a title already names every matching chat's line
+            if per_chat.get(hit["session_id"], 0) >= 2:
+                continue
+            per_chat[hit["session_id"]] = per_chat.get(hit["session_id"], 0) + 1
+            label = _excerpt(self._chat_label(con, project, hit["session_id"], labels), 90)
+            rows.append((hit["id"], f"{hit['sequence']}+1 | {_when(hit['timestamp'], hit['timestamp'])} | chat: {label} | "
+                                    f"{hit['role']}: {_flat(_excerpt(hit['excerpt'], 420))}\n"))
+        return rows
 
     def _node_line(self, con: sqlite3.Connection, project: str, node: dict[str, Any]) -> str:
         """``lo+n | dates | text`` for one node; dates are the span's source times (UTC)."""
@@ -1166,6 +1504,8 @@ class Store:
                             "AND source_timestamp IS NOT NULL ORDER BY sequence LIMIT 1", (project, node["lo"], node["hi"])).fetchone()
         last = con.execute("SELECT source_timestamp FROM events WHERE project=? AND sequence BETWEEN ? AND ? "
                            "AND source_timestamp IS NOT NULL ORDER BY sequence DESC LIMIT 1", (project, node["lo"], node["hi"])).fetchone()
+        if not node["summary"]:
+            return ""  # only hidden records (classify.py): nothing to show
         tag = {"semantic": "summary: ", "extractive": "excerpt: "}.get(node["mode"], "")
         return f"{node['ref']} | {_when(first and first[0], last and last[0])} | {tag}{_readable(node['summary'])}\n"
 
@@ -1196,7 +1536,8 @@ class Store:
         left_chars = chars - sum(c for c, _ in cost)
         left_bytes = size_bytes - sum(b for _, b in cost)
         # Heap of splittable nodes by age in units of their own width.
-        heap = [((count - node["hi"]) / (node["hi"] - node["lo"] + 1), node["lo"], node["id"]) for node in frontier if node["children"]]
+        heap = [((count - node["hi"]) / (node["hi"] - node["lo"] + 1), node["lo"], node["id"]) for node in frontier
+                if node["children"] and node["summary"]]
         heapq.heapify(heap)
         position = {node["id"]: node for node in frontier}
         for _ in range(4096):
@@ -1216,7 +1557,7 @@ class Store:
             left_chars, left_bytes = left_chars - extra_chars, left_bytes - extra_bytes
             for child in children:
                 position[child["id"]] = child
-                if child["children"]:
+                if child["children"] and child["summary"]:
                     heapq.heappush(heap, ((count - child["hi"]) / (child["hi"] - child["lo"] + 1), child["lo"], child["id"]))
         return frontier, True
 
@@ -1235,7 +1576,7 @@ class Store:
         source_text = "\n\n".join(
             child["summary"] if child["mode"] != "extractive" else
             f"[Excerpt only of records {child['lo']}..{child['hi']}; the omitted text remains in the original records]\n" + child["summary"]
-            for child in children)
+            for child in children if child["summary"])
         source_hash = _hash([self._privacy_revision(con, project), [[child["id"], child["summary"], child["mode"], child["original_verbatim"]] for child in children]])
         return source_text, source_hash, all(child["original_verbatim"] for child in children)
 

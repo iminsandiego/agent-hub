@@ -265,10 +265,13 @@ class MemoryClient:
         self.config.check_project(project)
         return f"v1/projects/{quote(project, safe='')}/{suffix}"
 
-    def context(self, project: str, budget_chars: int = 8000, query: str | None = None) -> dict[str, Any]:
+    def context(self, project: str, budget_chars: int = 8000, query: str | None = None,
+                sections: list[str] | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {"budget_chars": max(512, min(budget_chars, 24000))}
         if query:
             params["query"] = query
+        if sections:
+            params["sections"] = ",".join(sections)
         return self.request("GET", self.project_path(project, "context"), params=params)
 
     def search(self, project: str, query: str, limit: int = 10) -> Any:
@@ -333,6 +336,9 @@ class LocalState:
                 );
                 CREATE TABLE IF NOT EXISTS cache (
                     id TEXT PRIMARY KEY, text TEXT NOT NULL, captured_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS prompted (
+                    session TEXT PRIMARY KEY, at REAL NOT NULL
                 );
             """)
             # Capture parser version per file; files captured before 0.1.9 stay on version 1.
@@ -409,6 +415,14 @@ class LocalState:
             if identifiers is None:
                 return db.execute(reset).rowcount
             return sum(db.execute(reset + " AND id=?", (identifier,)).rowcount for identifier in identifiers)
+
+    def first_prompt(self, session: str, *, now: float | None = None) -> bool:
+        """True once per native session: the first prompt gets matching history."""
+        now = time.time() if now is None else now
+        key = hashlib.sha256(session.encode("utf-8")).hexdigest()
+        with self.connect() as db:
+            db.execute("DELETE FROM prompted WHERE at<?", (now - 90 * 86400,))
+            return db.execute("INSERT OR IGNORE INTO prompted VALUES(?,?)", (key, now)).rowcount == 1
 
     def checkpoint(self, identifier: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -585,7 +599,13 @@ def enqueue_hook(config: ClientConfig, payload: dict[str, Any], client: str, sta
     })
 
 
-def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars: int = 8000, memory: MemoryClient | None = None) -> dict[str, Any]:
+# Claude Code delivers at most 10,000 characters of one hook's additionalContext
+# to the model (more becomes a preview of a saved file; measured with 2.1.304),
+# so each hook stays under it. Startup and the first prompt each get this much.
+HOOK_CONTEXT_CHARS = 9500
+
+
+def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars: int = HOOK_CONTEXT_CHARS, memory: MemoryClient | None = None) -> dict[str, Any]:
     state = LocalState(config)
     project = config.resolve_project(payload.get("cwd"))
     key = state.cache_key(config, project)
@@ -616,9 +636,50 @@ def hook_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars:
     return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": bounded_context(text, budget_chars)}}
 
 
+def prompt_context(config: ClientConfig, payload: dict[str, Any], *, budget_chars: int = HOOK_CONTEXT_CHARS,
+                   memory: MemoryClient | None = None) -> dict[str, Any]:
+    """Records matching a chat's first prompt, grouped by chat (UserPromptSubmit).
+
+    Only the first prompt of a session is searched; later prompts return
+    nothing, so a long chat is not refilled with history every turn. An outage
+    or slow service also returns nothing rather than delaying the prompt.
+    """
+    prompt = payload.get("prompt")
+    session = payload.get("session_id")
+    if not isinstance(prompt, str) or not prompt.strip() or not isinstance(session, str) or not session:
+        return {}
+    state = LocalState(config)
+    if not state.first_prompt(session):
+        return {}
+    project = config.resolve_project(payload.get("cwd"))
+    owned = memory is None
+    connection = memory or MemoryClient(config, timeout=1.5)
+    try:
+        try:
+            result = connection.context(project, budget_chars=budget_chars, query=prompt.strip()[:1000], sections=["matches"])
+        except ServiceError as exc:
+            if exc.status in {401, 403, 404}:
+                raise
+            return {}
+        except (OSError, TimeoutError):
+            return {}
+        except Exception as exc:
+            import httpx
+            if not isinstance(exc, httpx.TransportError):
+                raise
+            return {}
+    finally:
+        if owned:
+            connection.close()
+    text = str(result.get("text", ""))
+    if not result.get("event_ids"):
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": bounded_context(text, budget_chars)}}
+
+
 def bounded_context(text: str, budget: int) -> str:
     """Keep source lines intact when fitting historical context into a hook."""
-    budget = max(256, min(budget, 8000))
+    budget = max(256, min(budget, HOOK_CONTEXT_CHARS))
     if len(text) <= budget:
         return text
     suffix = "\n[Additional history omitted; retrieve it with memory tools.]"

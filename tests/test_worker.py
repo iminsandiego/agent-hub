@@ -482,6 +482,16 @@ def test_a_repeatedly_rejected_summary_blocks_only_that_node(settings, monkeypat
     assert worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=20)["calls"] == 0
 
 
+@pytest.mark.parametrize("junk", ["-" * 300, "----- " + "-" * 200, "<budget:token_budget>512</budget:token_budget>"])
+def test_a_ruler_copy_or_control_tag_is_not_stored_as_a_summary(settings, monkeypatch, junk):
+    seed(settings, ["Event 0 " + "detail " * 120])
+    fake_provider(monkeypatch, lambda *_: junk)
+    result = worker.run_worker(settings, project="alpha", use_llm=True, mode="summaries", max_calls=5)
+    assert result["summaries"] == 0 and [e["status"] for e in result["errors"]] == ["rejected"]
+    assert "not usable" in result["errors"][0]["error"]
+    assert Store(settings.database).view("alpha", max_nodes=1)[0]["mode"] == "extractive"
+
+
 def test_an_oversized_record_no_longer_holds_back_the_whole_tree(settings, monkeypatch):
     seed(settings, ["Huge tool output " + "x" * worker.MAX_INPUT_CHARS] + [f"Event {i} " + "detail " * 120 for i in range(1, 8)])
     fake_provider(monkeypatch, lambda *_: "short semantic summary")

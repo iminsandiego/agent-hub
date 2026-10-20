@@ -160,14 +160,10 @@ def restore(args):
         raise
 
 
-def reorder(args):
-    """Put a project's records in source-time order (see Store.reorder_by_time)."""
+def _renumbering(args, change):
+    """Run a position-changing store operation under the worker lock, then move
+    the worker's checkpoints to the new positions (reorder and prune)."""
     settings = settings_for(args)
-    store = Store(settings.database)
-    if not args.apply:
-        plan = store.reorder_by_time(args.project)
-        output({**plan, "next": "Back up first (agent-hub backup), then run again with --apply."})
-        return
     import sqlite3
     from .worker import _connection as worker_ledger
     lock = sqlite3.connect(settings.data_dir / ("worker-lock-" + args.project + ".sqlite3"), timeout=0)
@@ -176,7 +172,7 @@ def reorder(args):
             lock.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError:
             raise ValueError("A worker run holds this project's lock; retry when it finishes") from None
-        result = store.reorder_by_time(args.project, apply=True)
+        result = change(Store(settings.database))
         mapping = result.pop("sequence_map")
         ledger = worker_ledger(settings)
         try:
@@ -196,10 +192,42 @@ def reorder(args):
             ledger.commit()
         finally:
             ledger.close()
-        output({**result, "worker_checkpoints": cursors, "summary_blocks_cleared": cleared})
+        return {**result, "worker_checkpoints": cursors, "summary_blocks_cleared": cleared}
     finally:
         lock.rollback()
         lock.close()
+
+
+def reorder(args):
+    """Put a project's records in source-time order (see Store.reorder_by_time)."""
+    if not args.apply:
+        plan = Store(settings_for(args).database).reorder_by_time(args.project)
+        output({**plan, "next": "Back up first (agent-hub backup), then run again with --apply."})
+        return
+    output(_renumbering(args, lambda store: store.reorder_by_time(args.project, apply=True)))
+
+
+def prune(args):
+    """Delete bookkeeping and excluded sessions, then close the gaps (see Store.prune)."""
+    settings = settings_for(args)
+    if not args.apply:
+        plan = Store(settings.database).prune(args.project)
+        output({**plan, "next": "Back up first (agent-hub backup), then run again with --apply."})
+        return
+    database = Path(settings.database)
+    before = database.stat().st_size
+    result = _renumbering(args, lambda store: store.prune(args.project, apply=True))
+    import sqlite3
+    # VACUUM rewrites the file without the freed pages; it needs about the new
+    # size in free disk space and briefly blocks writers (uploads wait and retry).
+    con = sqlite3.connect(database, timeout=60)
+    try:
+        con.execute("PRAGMA busy_timeout=60000")
+        con.execute("VACUUM")
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        con.close()
+    output({**result, "file_bytes": {"before": before, "after": database.stat().st_size}})
 
 
 def rebuild(args):
@@ -306,6 +334,11 @@ def register_commands(subparsers):
     reorder_parser.add_argument("--project", required=True)
     reorder_parser.add_argument("--apply", action="store_true", help="Write the new order (default: report what would change)")
     reorder_parser.set_defaults(func=reorder)
+    prune_parser = subparsers.add_parser("prune", help="Delete records with no content of their own (bookkeeping, approval-reviewer threads)")
+    common(prune_parser)
+    prune_parser.add_argument("--project", required=True)
+    prune_parser.add_argument("--apply", action="store_true", help="Delete and compact (default: report what would be removed)")
+    prune_parser.set_defaults(func=prune)
     rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild lossy summary cache from original records")
     common(rebuild_parser)
     rebuild_parser.add_argument("--project", required=True)

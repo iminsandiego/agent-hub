@@ -118,6 +118,19 @@ agent-hub reorder --data-dir "$HOME/.local/share/agent-hub" --project PROJECT --
 
 Records sort by their source time, carried forward within each session (a record without a time follows the one before it; a session without times uses its capture time), so a session's own order never changes and overlapping sessions interleave. IDs, raw records, notes and search are unchanged. Positions and `lo+n` references change, gaps left by forgotten chats close, and the tree is rebuilt, which resets model-written summaries (the report shows how many). The command holds the worker's lock, moves its extraction checkpoints to just before the first record each stage had not processed (already-processed records after it are revisited; deduplication prevents repeated notes) and clears blocked tree nodes, which are found again without model calls. Capture can keep running; uploads wait for the reorder's write and then append after it. Run it again after any later backfill.
 
+## Remove what has no content of its own
+
+Captured logs are mostly harness bookkeeping. Since 0.1.12 the server discards it at ingest and does not archive Codex's approval-reviewer threads; an archive captured earlier still holds them. Classify, then prune:
+
+```bash
+agent-hub rebuild --data-dir "$HOME/.local/share/agent-hub" --project PROJECT        # reclassify, rebuild the tree
+agent-hub backup --data-dir "$HOME/.local/share/agent-hub" --output "$HOME/agent-hub-before-prune.sqlite3"
+agent-hub prune --data-dir "$HOME/.local/share/agent-hub" --project PROJECT          # report only
+agent-hub prune --data-dir "$HOME/.local/share/agent-hub" --project PROJECT --apply  # delete, renumber, VACUUM
+```
+
+The report gives the records and bytes it would remove, the excluded threads and any record kept because a note cites it. `--apply` holds the worker's lock, deletes in one transaction, renumbers positions like `reorder` (translating worker checkpoints), rebuilds the tree, then runs `VACUUM`, which needs free disk space of about the new file size and briefly blocks uploads (they wait and retry). Deleted text is not zeroed in place; VACUUM rewrites the file without it. On the home archive (2026-10-20, a scratch copy): 341,570 of 501,895 records and 4.2 of 5.9 GB of record text, 173 s, then VACUUM 32 s, 8.1 GB to 2.55 GB.
+
 ## Rebuild and upgrades
 
 ```bash

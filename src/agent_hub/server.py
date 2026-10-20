@@ -203,12 +203,15 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 
     @mcp.tool(annotations=readonly)
-    async def memory_context(project: str, budget_chars: int = 12000, query: str | None = None) -> dict:
-        """Get a bounded history pack: reviewed memories and lossy history summaries."""
+    async def memory_context(project: str, budget_chars: int = 12000, query: str | None = None,
+                             sections: list[str] | None = None) -> dict:
+        """Get a bounded history pack: reviewed notes, records matching the query, recent chats and lossy history.
+
+        sections limits the pack to some of notes, matches, chats and history (default: all)."""
         authorize(project)
         if not 512 <= budget_chars <= 64000 or (query and len(query) > 1000):
             raise ValueError("Context budget must be 512..64000 characters; query <=1000 characters")
-        return bounded_result(await run(store.context, project, budget_chars, query))
+        return bounded_result(await run(store.context, project, budget_chars, query, sections))
 
     @mcp.tool(annotations=readonly)
     async def memory_search(project: str, query: str, limit: int = 10) -> list[dict]:
@@ -352,8 +355,9 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @app.get("/v1/projects/{project}/context")
     async def context(project: str, budget_chars: int = Query(default=12000, ge=512, le=64000),
-                      query: str | None = Query(default=None, max_length=1000)):
-        return await memory_context(project, budget_chars, query)
+                      query: str | None = Query(default=None, max_length=1000),
+                      sections: str | None = Query(default=None, max_length=64)):
+        return await memory_context(project, budget_chars, query, sections.split(",") if sections else None)
 
     @app.get("/v1/projects/{project}/search")
     async def search(project: str, query: str = Query(max_length=1000), limit: int = Query(default=10, ge=1, le=50)):

@@ -95,8 +95,11 @@ def make_leaf(
     event_id: str | None = None,
     role: str | None = None,
     summary_bytes: int = SUMMARY_BYTES,
+    hidden: bool = False,
 ) -> dict[str, Any]:
-    source = event_source(text, role)
+    # A hidden record (bookkeeping, injected or derived; see classify.py) keeps
+    # its position with an empty line, so excerpts are drawn from conversation.
+    source = "" if hidden else event_source(text, role)
     complete = len(source.encode("utf-8")) <= summary_bytes
     return {
         "id": node_id(project, sequence, sequence),
@@ -129,15 +132,14 @@ def merge_nodes(
     original = bool(left.get("original_verbatim")) and bool(
         right.get("original_verbatim")
     )
-    source = left["summary"] + "\n\n" + right["summary"]
+    parts = [part for part in (left["summary"], right["summary"]) if part]
+    source = "\n\n".join(parts)
     complete = original and len(source.encode("utf-8")) <= summary_bytes
     return {
         "id": node_id(project, left["lo"], right["hi"]),
         "lo": left["lo"],
         "hi": right["hi"],
-        "summary": source if complete else compact_excerpts(
-            [left["summary"], right["summary"]], summary_bytes
-        ),
+        "summary": source if complete else compact_excerpts(parts, summary_bytes),
         "mode": "verbatim" if complete else "extractive",
         "children": [left["id"], right["id"]],
         "event_id": None,
@@ -165,6 +167,7 @@ def build_tree(
             event_id=event.get("id", event.get("event_id")),
             role=event.get("role"),
             summary_bytes=summary_bytes,
+            hidden=bool(event.get("hidden")),
         )
         nodes.append(current)
         by_range[(sequence, sequence)] = current

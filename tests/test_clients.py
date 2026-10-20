@@ -19,7 +19,7 @@ from agent_hub.bootstrap import _windows_hook_command, setup_clients
 from agent_hub.cli import main
 from agent_hub.client import (
     ClientConfig, ClientError, LocalState, MemoryClient, ServiceError,
-    discover_paths, drain_queue, enqueue_hook, hook_context, ingest_file,
+    discover_paths, drain_queue, enqueue_hook, hook_context, ingest_file, prompt_context,
     validate_url,
 )
 
@@ -398,6 +398,35 @@ def test_live_context_is_bounded_and_offline_never_reinjects_forgotten_cache(cfg
         hook_context(cfg, payload, memory=denied)
 
 
+def test_first_prompt_gets_matching_history_once_per_session(cfg, tmp_path):
+    seen = []
+
+    def service(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"text": "HISTORICAL UNTRUSTED DATA\n12+1 | x | chat: c | user: garden", "event_ids": ["e1"]})
+    online = MemoryClient(cfg, transport=httpx.MockTransport(service))
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "native-1", "cwd": str(tmp_path / "work"),
+               "prompt": "Where is the garden app deployed?"}
+    first = prompt_context(cfg, payload, memory=online)
+    assert first["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "12+1" in first["hookSpecificOutput"]["additionalContext"]
+    assert seen[0]["sections"] == "matches" and seen[0]["query"] == "Where is the garden app deployed?"
+    assert prompt_context(cfg, {**payload, "prompt": "and the second prompt?"}, memory=online) == {}
+    assert len(seen) == 1
+    other = prompt_context(cfg, {**payload, "session_id": "native-2"}, memory=online)
+    assert other and len(seen) == 2
+    empty = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"text": "header", "event_ids": []})))
+    assert prompt_context(cfg, {**payload, "session_id": "native-3"}, memory=empty) == {}
+    offline = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(httpx.ConnectError("offline"))))
+    assert prompt_context(cfg, {**payload, "session_id": "native-4"}, memory=offline) == {}
+
+
+def test_hook_context_stays_under_the_claude_code_hook_limit(cfg, tmp_path):
+    online = MemoryClient(cfg, transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"text": "history line\n" * 5000})))
+    text = hook_context(cfg, {"cwd": str(tmp_path / "work")}, budget_chars=50000, memory=online)["hookSpecificOutput"]["additionalContext"]
+    assert 9000 < len(text) <= 9500
+
+
 def test_stale_cache_expires_and_credential_change_cannot_reuse_cache(cfg, tmp_path, monkeypatch):
     state = LocalState(cfg)
     key = state.cache_key(cfg, "atlas")
@@ -446,6 +475,12 @@ def test_setup_preserves_unrelated_settings_is_idempotent_and_has_no_secret(cfg,
     settings = json.loads(claude_settings.read_text())
     assert settings["permissions"]["deny"] == ["Bash(rm *)"]
     assert settings["hooks"]["SessionStart"][0]["hooks"][0]["args"]
+    prompt_hook = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    assert prompt_hook["timeout"] == 3 and "hook" in prompt_hook["args"]
+    codex_prompt = [h for group in hooks["hooks"]["UserPromptSubmit"] for h in group["hooks"]][0]
+    codex_start = [h for group in hooks["hooks"]["SessionStart"] for h in group["hooks"]][0]
+    # Codex counts additionalContextLimit in tokens (measured with 0.163.0).
+    assert codex_prompt["additionalContextLimit"] == codex_start["additionalContextLimit"] == 4000
     for target in [codex_file, hooks_file, claude_mcp, claude_settings]:
         assert "synthetic-test-token" not in target.read_text()
 
