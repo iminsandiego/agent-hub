@@ -142,6 +142,8 @@ Memory kinds are decision, instruction, observation, procedure, failure, questio
 
 All normal writes create `candidate` records. The five agent tools cannot activate, reject, or supersede a note. A local administrative command or authenticated administrative browser/API action changes its state. Activation may explicitly supersede one prior active memory in the same project. The old statement remains present and marked superseded, retrievable by ID or the explicit status list. Ordinary memory search includes candidates and active notes. The source events behind a rejected or superseded note can still appear in event search or the historical tree; reviewing a note does not erase its historical evidence.
 
+An administrator can permanently delete a rejected note (`DELETE /v1/projects/{project}/memories/{id}`; an active note is retired first). Its statement, search entry, source links, idempotency keys and review history are erased, including reviews of other notes that name it; a note it replaced, or that replaced it, keeps its status and loses the link. Its source events stay. Nothing remembers the statement afterwards, so it can be proposed again, whereas a rejected note absorbs a repeat proposal. The memory list (`GET /v1/projects/{project}/memories`) takes an optional `query` and keeps notes whose statement contains every word, ASCII case-insensitively, up to eight words.
+
 Candidate generation has two modes:
 
 1. Local deterministic selection recognizes explicit user decision/instruction markers and preserves the selected wording. It is a limited heuristic, not general semantic understanding.

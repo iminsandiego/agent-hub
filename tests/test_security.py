@@ -92,6 +92,7 @@ def assert_tool_denied(response):
     ("GET", "/v1/projects/atlas/memories/unknown"),
     ("POST", "/v1/projects/atlas/memories"),
     ("POST", "/v1/projects/atlas/memories/unknown/review"),
+    ("DELETE", "/v1/projects/atlas/memories/unknown"),
     ("GET", "/v1/projects/atlas/stats"),
     ("GET", "/v1/catalog"),
     ("POST", "/mcp"),
@@ -662,3 +663,21 @@ def test_node_references_work_through_the_rest_route(secured_app):
             assert response.status_code == 200 and response.json()["node"]["ref"] == "0+1"
         assert client.get("/v1/projects/atlas/nodes/0+2", headers=auth(tokens)).status_code == 409
         assert client.get("/v1/projects/harbor/nodes/0+1", headers=auth(tokens)).status_code == 403
+
+
+def test_only_an_administrator_deletes_a_rejected_note(secured_app):
+    app, tokens = secured_app
+    with TestClient(app, base_url="http://localhost") as client:
+        note = client.post("/v1/projects/atlas/memories", headers=auth(tokens), json={"statement": "DELETE_ME_MARKER"}).json()
+        path = f"/v1/projects/atlas/memories/{note['id']}"
+        assert client.delete(path, headers=auth(tokens, "admin")).status_code == 409  # still a candidate
+        client.post(path + "/review", headers=auth(tokens, "admin"), json={"status": "rejected"})
+        assert client.delete(path, headers=auth(tokens)).status_code == 403
+        assert client.delete(path, headers=auth(tokens, "atlas_read")).status_code == 403
+        assert client.get(path, headers=auth(tokens)).status_code == 200
+        deleted = client.delete(path, headers=auth(tokens, "admin"))
+        assert deleted.status_code == 200 and deleted.json()["deleted"] is True
+        assert client.get(path, headers=auth(tokens)).status_code == 404
+        assert client.delete(path, headers=auth(tokens, "admin")).status_code == 404
+        listed = client.get("/v1/projects/atlas/memories?status=rejected&query=delete_me", headers=auth(tokens)).json()
+    assert listed == []
