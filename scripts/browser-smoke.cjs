@@ -71,7 +71,30 @@ async function main() {
     await page.getByRole("button", { name: "Activate", exact: true }).click();
     await page.getByText("Nothing awaiting review", { exact: true }).waitFor();
     await page.getByRole("link", { name: /^Active/ }).click();
-    await page.getByText("Decision: route native clients to the same scoped service on the execution host.", { exact: true }).waitFor();
+    const decision = "Decision: route native clients to the same scoped service on the execution host.";
+    await page.getByText(decision, { exact: true }).waitFor();
+
+    // Filter: matches every word on the server, shows a count, and says when nothing matches.
+    await page.getByLabel("Filter notes").fill("ROUTE native");
+    await page.getByText("1 match", { exact: true }).waitFor();
+    assert.equal(await page.locator(".note-card").count(), 1);
+    await page.getByLabel("Filter notes").fill("no such words here");
+    await page.getByText("No notes match “no such words here”", { exact: true }).waitFor();
+    await page.getByLabel("Filter notes").fill("route native");
+    await page.getByText("1 match", { exact: true }).waitFor();
+
+    // Delete: retire the note, then delete it permanently from the Rejected tab.
+    await page.locator(".note-card", { hasText: decision }).getByRole("button", { name: "Retire" }).click();
+    await page.getByRole("button", { name: "Retire note" }).click();
+    await page.getByRole("link", { name: /^Rejected/ }).click();
+    assert.equal(await page.getByLabel("Filter notes").inputValue(), "route native");  // the filter follows the tab
+    await page.locator(".note-card", { hasText: decision }).getByRole("button", { name: "Delete…" }).click();
+    await page.locator("dialog[open]").getByText("can’t be restored", { exact: false }).waitFor();
+    await page.screenshot({ path: path.join(output, "delete-note.png") });
+    await page.getByRole("button", { name: "Delete permanently" }).click();
+    await page.getByText("No notes match “route native”", { exact: true }).waitFor();
+    await page.getByLabel("Filter notes").fill("");
+    await page.getByText("No rejected notes", { exact: true }).waitFor();
 
     // Forget: cancelling keeps the chat; confirming removes it and its source-linked notes.
     await page.getByRole("link", { name: "Sessions" }).click();
@@ -122,7 +145,7 @@ async function main() {
     await page.getByLabel("Password").waitFor();
     assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
     assert.deepEqual(errors.filter(text => !text.includes("401")), []);
-    console.log(JSON.stringify({ browser_smoke: "passed", desktop: "1440x1000", mobile: "390x844", checks: ["server check", "wrong password message", "password sign-in", "session survives reload", "cookie unreadable by script", "home counts", "top-bar search", "highlighted results", "source inspection", "captured original", "session transcript", "XSS literal rendering", "context view", "timeline view", "candidate activation", "cancel forget preserves chat", "confirmed forget removes chat and notes", "catalog", "mobile overflow", "project switch", "sign out", "signed out after reload", "rejected token message", "token connect", "token dropped on reload", "no persistent browser credentials", "no browser exceptions"], screenshots: output }));
+    console.log(JSON.stringify({ browser_smoke: "passed", desktop: "1440x1000", mobile: "390x844", checks: ["server check", "wrong password message", "password sign-in", "session survives reload", "cookie unreadable by script", "home counts", "top-bar search", "highlighted results", "source inspection", "captured original", "session transcript", "XSS literal rendering", "context view", "timeline view", "candidate activation", "notes filter", "retire then delete a note", "cancel forget preserves chat", "confirmed forget removes chat and notes", "catalog", "mobile overflow", "project switch", "sign out", "signed out after reload", "rejected token message", "token connect", "token dropped on reload", "no persistent browser credentials", "no browser exceptions"], screenshots: output }));
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

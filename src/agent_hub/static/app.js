@@ -436,6 +436,21 @@ async function retireNote(note) {
   });
   if (ok) await reviewNote(note, "rejected");
 }
+async function deleteNote(note) {
+  const ok = await confirmAction({
+    title: "Delete this note permanently?",
+    body: [el("blockquote", "quote", note.statement), el("p", "muted", "The note, its source links and its review history are erased and can’t be restored. " +
+      "The chats it came from stay in memory. A rejected note also stops agents proposing the same statement again; once deleted, one could.")],
+    confirm: "Delete permanently", danger: true,
+  });
+  if (!ok) return;
+  await api(base() + "/memories/" + enc(note.id), { method: "DELETE" });
+  toast("Note deleted.");
+  refreshCounts();
+  const shown = inspector.stack[inspector.stack.length - 1];
+  if (!$("inspector").hidden && shown && shown.type === "memory" && shown.id === note.id) closeInspector();
+  rerender();
+}
 function noteActions(note) {
   if (!isAdmin()) return null;
   if (note.status === "candidate") {
@@ -445,6 +460,7 @@ function noteActions(note) {
       button("Reject", () => reviewNote(note, "rejected"), { cls: "button ghost small" }));
   }
   if (note.status === "active") return el("div", "note-actions", button("Retire", () => retireNote(note), { cls: "button ghost small" }));
+  if (note.status === "rejected") return el("div", "note-actions", button("Delete…", () => deleteNote(note), { cls: "button ghost small danger-text" }));
   return null;
 }
 function noteCard(note, { compact = false } = {}) {
@@ -834,18 +850,21 @@ async function notesView(root, routeInfo) {
   const status = STATUS_LABEL[requested] ? requested : counts.candidate ? "candidate" : "active";
   if (requested !== status) {
     // Pin the chosen tab so acting on the last candidate doesn't switch tabs underneath you.
-    history.replaceState(null, "", href("notes", "", { status }));
+    history.replaceState(null, "", href("notes", "", { status, q: routeInfo.params.get("q") }));
     routeInfo.params.set("status", status);
   }
-  const notes = await api(base() + "/memories?status=" + status + "&limit=200");
+  const query = (routeInfo.params.get("q") || "").trim();
+  const load = (text) => api(base() + "/memories?status=" + status + "&limit=200" + (text ? "&query=" + enc(text) : ""));
+  const notes = await load(query);
   root.append(pageHead({
     title: "Notes",
     sub: "Short statements tied to their sources. Active notes start every new agent session in this project; candidates wait for review.",
     actions: canWrite() ? button("New note", () => composeNote(), { cls: "button primary", iconName: "plus" }) : null,
   }));
-  root.append(el("nav", { class: "tabs", "aria-label": "Note status" }, Object.entries(STATUS_LABEL).map(([value, label]) =>
-    el("a", { class: "tab", href: href("notes", "", { status: value }), "aria-current": value === status ? "page" : undefined },
-      label, counts[value] ? el("span", "count", num(counts[value])) : null))));
+  const tabs = Object.entries(STATUS_LABEL).map(([value, label]) =>
+    el("a", { class: "tab", href: href("notes", "", { status: value, q: query }), "aria-current": value === status ? "page" : undefined },
+      label, counts[value] ? el("span", "count", num(counts[value])) : null));
+  root.append(el("nav", { class: "tabs", "aria-label": "Note status" }, tabs));
   if (!isAdmin() && status === "candidate") root.append(el("p", "callout", "You can browse notes with this token. Activating or rejecting a note needs the server’s administrator token."));
   const empty = {
     candidate: ["Nothing awaiting review", "Agents propose candidates with the memory_note tool, and you can write one here."],
@@ -853,19 +872,50 @@ async function notesView(root, routeInfo) {
     rejected: ["No rejected notes", ""],
     superseded: ["No superseded notes", "When an active note is replaced, the earlier version is kept here."],
   }[status];
-  root.append(el("div", "stack", notes.length ? notes.map((note) => noteCard(note)) : stateBlock(empty[0], empty[1])));
+  // The filter runs on the server, so it also finds notes beyond the newest 200.
+  const filter = el("input", { type: "search", id: "notes-filter", placeholder: "Filter these notes", "aria-label": "Filter notes", value: query, autocomplete: "off" });
+  const count = el("span", "faint");
+  const list = el("div", "stack");
+  const draw = (items, text) => {
+    count.textContent = text ? plural(items.length, "match", "matches") + (items.length === 200 ? " (newest 200)" : "") : "";
+    list.replaceChildren(...(items.length ? items.map((note) => noteCard(note))
+      : [text ? stateBlock("No notes match “" + text + "”", "The filter matches words in note statements. Search also covers captured records.") : stateBlock(empty[0], empty[1])]));
+  };
+  let timer = 0;
+  let latest = 0;
+  filter.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      if (!filter.isConnected) return;  // the page changed while waiting
+      const text = filter.value.trim();
+      const request = ++latest;
+      // Keep the filter in the address so tabs, reloads and actions that redraw the page keep it.
+      history.replaceState(null, "", href("notes", "", { status, q: text }));
+      routeInfo.params.set("q", text);
+      tabs.forEach((tab, index) => { tab.href = href("notes", "", { status: Object.keys(STATUS_LABEL)[index], q: text }); });
+      try {
+        const items = await load(text);
+        if (request === latest) draw(items, text);
+      } catch (e) {
+        if (request === latest) toast(e.message, "error");
+      }
+    }, 250);
+  });
+  draw(notes, query);
+  if (query || counts[status]) root.append(el("div", "toolbar", filter, count));
+  root.append(list);
 }
 
 async function contextView(root, routeInfo) {
-  const budgets = [2000, 4000, 8000, 12000, 24000];
-  const budget = budgets.includes(Number(routeInfo.params.get("budget"))) ? Number(routeInfo.params.get("budget")) : 8000;
+  const budgets = [2000, 4000, 9500, 12000, 24000];
+  const budget = budgets.includes(Number(routeInfo.params.get("budget"))) ? Number(routeInfo.params.get("budget")) : 9500;
   const query = (routeInfo.params.get("q") || "").trim();
   const pack = await api(base() + "/context?budget_chars=" + budget + (query ? "&query=" + enc(query) : ""));
   root.append(pageHead({
     title: "Agent context",
-    sub: "What an agent in this project receives when it asks memory for context. The startup hook requests 8,000 characters. Everything is labelled as historical data, not instructions.",
+    sub: "What an agent in this project receives when it asks memory for context. The startup hook requests 9,500 characters. Everything is labelled as historical data, not instructions.",
   }));
-  const size = el("select", { id: "context-budget", "aria-label": "Context size" }, budgets.map((value) => el("option", { value }, num(value) + " characters" + (value === 8000 ? " (startup)" : ""))));
+  const size = el("select", { id: "context-budget", "aria-label": "Context size" }, budgets.map((value) => el("option", { value }, num(value) + " characters" + (value === 9500 ? " (startup)" : ""))));
   size.value = String(budget);
   const focus = el("input", { type: "search", id: "context-query", placeholder: "Focus on a task (optional)", "aria-label": "Focus on a task", value: query });
   const form = el("form", "toolbar", size, focus, el("button", { class: "button", type: "submit" }, "Preview"));
