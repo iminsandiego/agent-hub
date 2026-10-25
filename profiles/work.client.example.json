@@ -17,5 +17,6 @@
     }
   ],
   "capture_paths": [],
-  "state_dir": "/absolute/private/work/state"
+  "state_dir": "/absolute/private/work/state",
+  "skills_repo": null
 }

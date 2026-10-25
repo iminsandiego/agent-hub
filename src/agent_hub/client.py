@@ -176,8 +176,11 @@ class ClientConfig:
     strict_scope: bool = False
     t3_database: str | None = None
     codex_database: str | None = None
+    skills_repo: str | None = None
 
     def __post_init__(self) -> None:
+        from .skills import validate_skills_repo
+        self.skills_repo = validate_skills_repo(self.skills_repo)
         if self.t3_database is not None and (not isinstance(self.t3_database, str) or not self.t3_database or not Path(self.t3_database).expanduser().is_absolute()):
             raise ClientError("t3_database must be an absolute SQLite path or null")
         if self.codex_database is not None and (not isinstance(self.codex_database, str) or not self.codex_database or not Path(self.codex_database).expanduser().is_absolute()):

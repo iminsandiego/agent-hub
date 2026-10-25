@@ -65,6 +65,7 @@ def configure(args: argparse.Namespace) -> int:
         strict_scope=args.strict_scope or (existing.strict_scope if existing else False),
         t3_database=args.t3_database or (existing.t3_database if existing else None),
         codex_database=args.codex_database or (existing.codex_database if existing else None),
+        skills_repo=existing.skills_repo if existing else None,
     )
     # Validate the entire prospective configuration before rotating a credential.
     # An invalid URL or project mapping must leave a working installation intact.
@@ -82,14 +83,28 @@ def configure(args: argparse.Namespace) -> int:
 
 def setup(args: argparse.Namespace) -> int:
     from .bootstrap import setup_clients
+    from .skills import prompt_for_repo, sync_skills, validate_skills_repo
+    config_path = Path(args.config).expanduser() if args.config else default_config_path()
+    config = config_for(args)
     result = setup_clients(
-        config_for(args), args.config or default_config_path(), clients=args.clients,
+        config, config_path, clients=args.clients,
         codex_home=args.codex_home, claude_home=args.claude_home,
         claude_mcp_file=args.claude_mcp_file, transport=args.transport,
         hooks=not args.no_hooks, dry_run=args.dry_run,
     )
+    # Skills come last, so a missing or unreachable repository never blocks the
+    # MCP and hook setup above. The address is kept only in client.json.
+    repo = config.skills_repo
+    if args.skills_repo is not None:
+        repo = "" if args.skills_repo == "none" else validate_skills_repo(args.skills_repo)
+    elif repo is None and not args.dry_run and sys.stdin.isatty():
+        repo = prompt_for_repo()
+    if repo != config.skills_repo and not args.dry_run:
+        config.skills_repo = repo
+        config.save(config_path)
+    result["skills"] = sync_skills(repo, config_path, dry_run=args.dry_run)
     output(result)
-    return 0
+    return 1 if result["skills"]["status"] == "error" else 0
 
 
 def doctor(args: argparse.Namespace) -> int:
@@ -355,6 +370,7 @@ def register_commands(subparsers) -> None:
     setup_parser.add_argument("--claude-mcp-file")
     setup_parser.add_argument("--no-hooks", action="store_true")
     setup_parser.add_argument("--dry-run", action="store_true")
+    setup_parser.add_argument("--skills-repo", metavar="URL_OR_PATH", help="Private skills repository to clone/update and install from (saved in client.json); 'none' to stop asking")
     setup_parser.set_defaults(func=setup)
     check = subparsers.add_parser("doctor", help="Inspect credentials, service reachability, versions, and capture queue")
     check.add_argument("--offline", action="store_true")

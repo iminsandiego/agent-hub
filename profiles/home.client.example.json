@@ -17,5 +17,6 @@
     }
   ],
   "capture_paths": [],
-  "state_dir": "/absolute/private/home/state"
+  "state_dir": "/absolute/private/home/state",
+  "skills_repo": "git@github.com:YOUR-ACCOUNT/YOUR-PRIVATE-SKILLS.git"
 }
