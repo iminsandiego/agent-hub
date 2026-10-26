@@ -35,7 +35,7 @@ import json
 import re
 from typing import Any
 
-CLASSIFIER_VERSION = 1
+CLASSIFIER_VERSION = 2
 
 BOOKKEEPING = "bookkeeping"
 INJECTED = "injected"
@@ -49,9 +49,10 @@ DEMOTED = (INJECTED, DERIVED)
 # Placeholder texts our own adapters write when a record has no text of its own.
 _MARKER = re.compile(
     r"^(Codex event: |Codex (session_meta|turn_context|compacted) metadata\.|"
-    r"Claude (system|summary|progress|queue-operation|file-history-snapshot) metadata\.)"
+    r"Claude (system|summary|progress|queue-operation|file-history-snapshot) metadata\.|"
+    r"Cursor turn ended \()"
 )
-_UNSUPPORTED = re.compile(r"^Unsupported (Codex|Claude) record \(([^)]+)\)")
+_UNSUPPORTED = re.compile(r"^Unsupported (Codex|Claude|Cursor) record \(([^)]+)\)")
 # A message whose content is an image, document or file has no normalized text.
 _NONTEXT = re.compile(r'"type"\s*:\s*"(image|input_image|image_url|localImage|document|input_file|file)"')
 _QUEUED = re.compile(r'"type"\s*:\s*"queued_command"')
@@ -64,12 +65,19 @@ _NOISE_TYPES = {
     "Claude": {"attachment", "last-prompt", "atis-latch", "bridge-session", "agent-name", "mode", "pr-link",
                "cost-state", "file-history-delta", "api-request", "api-request-blob", "api-request-shape",
                "fork-context-ref"},
+    "Cursor": set(),
 }
 # Blocks clients inject into the user's turn; same shape the v2 parser recognizes.
 _INJECTED = re.compile(r"^\s*(<[a-z_][a-z0-9_-]*[ >]|# AGENTS\.md|Caveat: The messages below were generated|"
                        r"Context handoff \()", re.I)
 # Slash commands and subagent reports are the user's or an agent's own actions.
 _KEPT_TAGS = re.compile(r"^\s*<(command-name|command-message|subagent_notification|pasted_content)[ >]", re.I)
+# Cursor wraps the user's own prompt in <user_query>, sometimes after a <timestamp> block.
+_USER_QUERY = re.compile(r"<user_query>", re.I)
+
+
+def _kept(text: str) -> bool:
+    return bool(_KEPT_TAGS.match(text) or _USER_QUERY.search(text))
 
 
 # A Codex rollout line starts {"timestamp":..,"type":..,"payload":{"type":..}; the
@@ -122,7 +130,7 @@ def classify_event(role: str, text: str, raw: str = "") -> str | None:
         return INJECTED
     if role == "developer":
         return INJECTED
-    if role in {"user", "system"} and _INJECTED.match(text) and not _KEPT_TAGS.match(text) and _all_blocks_injected(raw):
+    if role in {"user", "system"} and _INJECTED.match(text) and not _kept(text) and _all_blocks_injected(raw):
         return INJECTED
     if role == "tool" or (role == "assistant" and text.startswith("Tool call:")):
         return TOOL
@@ -197,7 +205,7 @@ def _all_blocks_injected(raw: str) -> bool:
     if not isinstance(content, list):
         return True
     texts = [block.get("text") for block in content if isinstance(block, dict) and isinstance(block.get("text"), str)]
-    return all(_INJECTED.match(text) and not _KEPT_TAGS.match(text) for text in texts if text.strip())
+    return all(_INJECTED.match(text) and not _kept(text) for text in texts if text.strip())
 
 
 def needs_whole_source(role: str, text: str) -> bool:

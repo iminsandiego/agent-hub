@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .client import ClientConfig, ClientError, atomic_write
+from .client import ClientConfig, ClientError, _normalized_path, atomic_write
 
 
 @dataclass
@@ -253,6 +253,9 @@ def setup_clients(
             notes.append("Restart Claude Code and inspect /mcp and /hooks. Workspace trust and organization policies still apply.")
 
     if "cursor" in requested:
+        if transport != "stdio":
+            # Cursor interpolates ${env:NAME}, not the ${NAME} header form written for Claude; unverified.
+            raise ClientError("Cursor setup supports only the default stdio transport.")
         home = Path(cursor_home or Path.home() / ".cursor").expanduser()
         mcp_path = home / "mcp.json"
         document, original = _json_file(mcp_path)
@@ -267,7 +270,7 @@ def setup_clients(
         # Cursor's hook events and payloads differ from Claude's and Codex's, so no
         # hooks are written. The watcher captures its transcripts from a capture path.
         projects = home / "projects"
-        if str(projects) not in config.capture_paths and str(projects.resolve()) not in config.capture_paths:
+        if _normalized_path(str(projects)) not in {_normalized_path(path) for path in config.capture_paths}:
             notes.append(f"Cursor has no Agent Hub hooks. Add its transcripts with: agent-hub configure --capture-path \"{projects}\"")
         notes.append("Restart Cursor and enable agent-hub under Settings > MCP.")
 

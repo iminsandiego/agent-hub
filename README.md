@@ -8,7 +8,7 @@ A private home for your coding agents' shared memory, with one repository for th
 
 ## What it does
 
-- Keep captured Codex, Claude, T3 and generic records on your server with stable source identity, deduplication, provenance and source timestamps.
+- Keep captured Codex, Claude, Cursor, T3 and generic records on your server with stable source identity, deduplication, provenance and source timestamps.
 - Give each computer its own revocable token scoped to projects such as `atlas`, `harbor` and `personal`. People sign in to the browser view with a password; tokens are for agents.
 - Expose `memory_context`, `memory_search`, `memory_get`, `memory_zoom` and `memory_note` through MCP. Native clients keep control of their own tools and conversations.
 - Start each new chat with a compact, dated context: notes, recent chats (newest first, each with its opening request), and history covering the whole project from the summary tree's roots, oldest first. `sections` picks which parts are included.

@@ -19,7 +19,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
-from .adapters import ADAPTER_VERSION, AdapterError, SourceUnavailable, Transcript, export_codex_thread, parse_jsonl
+from .adapters import ADAPTER_VERSION, AdapterError, SourceUnavailable, Transcript, export_codex_thread, parse_jsonl, tail_settled
 
 
 class ClientError(ValueError):
@@ -612,7 +612,7 @@ def _ingest_file_version(
     data = source.read_bytes()
     stat = source.stat()
     transcript = parse_jsonl(data, client=client, machine=config.machine_id, path=str(source), session_id=session_id,
-                             cwd=cwd, final=final, adapter_version=adapter_version)
+                             cwd=cwd, final=final, adapter_version=adapter_version, settled=tail_settled(stat))
     target = config.resolve_project(transcript.cwd, project)
     config.check_transcript(transcript, target, cwd)
     identifier = file_key(config, source, client, session_id)

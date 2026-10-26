@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .adapters import AdapterError, parse_jsonl
+from .adapters import AdapterError, parse_jsonl, tail_settled
 from .client import (
     ClientConfig, ClientError, LocalState, MemoryClient, atomic_write,
     bounded_context, create_gateway, default_config_path, discover_paths, drain_queue,
@@ -209,7 +209,7 @@ def plan_import(args: argparse.Namespace) -> int:
             data = path.read_bytes()
             entry.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
             transcript = parse_jsonl(data, client=args.client, machine=config.machine_id,
-                                     path=str(path), final=args.final)
+                                     path=str(path), final=args.final, settled=tail_settled(path.stat()))
             project = config.resolve_project(transcript.cwd)
             config.check_transcript(transcript, project)
             entry.update(project=project, session_id=transcript.session_id,

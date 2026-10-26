@@ -86,9 +86,23 @@ class Transcript:
 
 
 def _cursor_message(item: dict[str, Any]) -> bool:
-    """A Cursor agent-transcript message: top-level role, content under message, no type."""
-    return (item.get("role") in {"user", "assistant"} and isinstance(item.get("message"), dict)
-            and "type" not in item and "sessionId" not in item)
+    """A Cursor agent-transcript message: exactly a role and a message holding a content list.
+
+    Generic exports with their own session, cwd or timestamp fields are not Cursor.
+    """
+    message = item.get("message")
+    return (set(item) == {"role", "message"} and item["role"] in {"user", "assistant"}
+            and isinstance(message, dict) and isinstance(message.get("content"), list))
+
+
+# Older Cursor versions never terminate a chat's last record; current versions do,
+# and their records are complete when terminated. An unterminated Cursor record is
+# taken as complete only once its file has been unchanged this long.
+CURSOR_TAIL_SETTLE_SECONDS = 600
+
+
+def tail_settled(stat: Any) -> bool:
+    return time.time() - stat.st_mtime >= CURSOR_TAIL_SETTLE_SECONDS
 
 
 def _detect_client(records: list[tuple[int, int, str, Any]]) -> str:
@@ -253,6 +267,7 @@ def parse_jsonl(
     final: bool = False,
     start_line: int = 0,
     adapter_version: int = ADAPTER_VERSION,
+    settled: bool = False,
 ) -> Transcript:
     """Parse complete records, preserving raw JSON text exactly.
 
@@ -260,6 +275,8 @@ def parse_jsonl(
     since the writer may still append to it. An explicit final import accepts a
     valid final record without a newline. Invalid complete lines fail visibly.
     Blank separator lines count toward source ordinals, but are not events.
+    ``settled`` (the source has not changed for CURSOR_TAIL_SETTLE_SECONDS) also
+    accepts a valid unterminated Cursor record, which older Cursor versions leave.
     """
     records: list[tuple[int, int, str, Any]] = []
     offset = 0
@@ -307,15 +324,20 @@ def parse_jsonl(
         except (UnicodeDecodeError, json.JSONDecodeError):
             pass
     if client == "auto":
-        # A new Cursor chat's only record is its unterminated tail.
-        client = _detect_client(records + ([(0, 0, "", tail_item)] if isinstance(tail_item, dict) else []))
+        try:
+            client = _detect_client(records)
+        except AdapterError:
+            # An older Cursor chat with one record has only its unterminated
+            # tail. Any other client still waits for a complete record.
+            if not (settled and isinstance(tail_item, dict) and _cursor_message(tail_item)):
+                raise
+            client = "cursor"
     if client not in {"codex", "claude", "cursor", "jsonl"}:
         raise AdapterError(f"Unsupported JSONL client: {client}")
-    if client == "cursor" and isinstance(tail_item, dict):
-        # Cursor never terminates its last record; each later record starts with
-        # the newline. A JSON object cannot parse until fully written, so a valid
-        # tail is complete. When the next record arrives, that event is resent
-        # unchanged and counts as a duplicate.
+    if client == "cursor" and settled and isinstance(tail_item, dict):
+        # The writer has been idle long enough that the tail is complete. If the
+        # next record arrives later, this event is resent unchanged and counts as
+        # a duplicate.
         ordinal, line = tail
         offset += len(line)
         complete_lines = ordinal - start_line
@@ -349,7 +371,8 @@ def parse_jsonl(
         resolved_session += ":subagent:" + Path(parts[-1]).stem
     elif client == "cursor" and len(parts) > 2 and parts[-2] == "subagents":
         # agent-transcripts/<parent>/subagents/<child>.jsonl; records carry no IDs.
-        parent_session = parts[-3]
+        # An explicit session ID (a deliberate new identity) names the parent.
+        parent_session = str(session_id) if session_id else parts[-3]
         resolved_session = parent_session + ":subagent:" + Path(parts[-1]).stem
     result = Transcript(
         client=client,
