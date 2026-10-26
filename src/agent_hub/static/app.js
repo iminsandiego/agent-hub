@@ -12,7 +12,7 @@ const state = {
   revision: 0, sessions: new Map(), conversationOnly: false,
 };
 const VIEW_NAMES = { home: "Home", search: "Search", sessions: "Sessions", notes: "Notes", context: "Agent context", timeline: "Timeline", integrations: "Connect agents" };
-const CLIENTS = { codex: ["Codex", "Cx"], claude: ["Claude Code", "Cl"], t3: ["T3", "T3"], chatgpt: ["ChatGPT", "GP"], generic: ["Generic", "Gn"] };
+const CLIENTS = { codex: ["Codex", "Cx"], claude: ["Claude Code", "Cl"], cursor: ["Cursor", "Cu"], t3: ["T3", "T3"], chatgpt: ["ChatGPT", "GP"], generic: ["Generic", "Gn"] };
 const ROLES = { user: "user", assistant: "assistant", tool: "tool", system: "system" };
 const KINDS = ["decision", "instruction", "observation", "procedure", "failure", "question", "preference"];
 const INJECTED = /^\s*(<[a-z_-]+>|# AGENTS\.md|Caveat:)/i;

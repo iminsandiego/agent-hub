@@ -158,6 +158,7 @@ def setup_clients(
     codex_home: str | Path | None = None,
     claude_home: str | Path | None = None,
     claude_mcp_file: str | Path | None = None,
+    cursor_home: str | Path | None = None,
     executable: str | None = None,
     transport: str = "stdio",
     hooks: bool = True,
@@ -167,7 +168,7 @@ def setup_clients(
 
     if transport not in {"stdio", "http"}:
         raise ClientError("transport must be stdio or http.")
-    unknown = set(clients) - {"codex", "claude", "t3"}
+    unknown = set(clients) - {"codex", "claude", "cursor", "t3"}
     if unknown:
         raise ClientError("Unknown client selection.")
     requested = list(dict.fromkeys(clients))
@@ -250,6 +251,25 @@ def setup_clients(
             _merge_hooks(hook_config, "claude", config_path, executable)
             plans.append(FileChange(hook_path, hook_original, _json_bytes(hook_config)))
             notes.append("Restart Claude Code and inspect /mcp and /hooks. Workspace trust and organization policies still apply.")
+
+    if "cursor" in requested:
+        home = Path(cursor_home or Path.home() / ".cursor").expanduser()
+        mcp_path = home / "mcp.json"
+        document, original = _json_file(mcp_path)
+        servers = document.setdefault("mcpServers", {})
+        if not isinstance(servers, dict):
+            raise ClientError("Existing Cursor mcpServers must be a JSON object.")
+        entry = _server_entry("cursor", config, config_path, executable, transport)
+        _may_replace(mcp_path, servers.get("agent-hub"), entry, managed)
+        servers["agent-hub"] = _merged_entry(servers.get("agent-hub"), entry)
+        plans.append(FileChange(mcp_path, original, _json_bytes(document)))
+        managed[str(mcp_path)] = {"server": entry}
+        # Cursor's hook events and payloads differ from Claude's and Codex's, so no
+        # hooks are written. The watcher captures its transcripts from a capture path.
+        projects = home / "projects"
+        if str(projects) not in config.capture_paths and str(projects.resolve()) not in config.capture_paths:
+            notes.append(f"Cursor has no Agent Hub hooks. Add its transcripts with: agent-hub configure --capture-path \"{projects}\"")
+        notes.append("Restart Cursor and enable agent-hub under Settings > MCP.")
 
     plans.append(FileChange(state_path, state_before, _json_bytes(managed)))
     changes = [change for change in plans if change.before != change.after]

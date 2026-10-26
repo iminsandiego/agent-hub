@@ -85,6 +85,12 @@ class Transcript:
     observed_cwds: list[str] = field(default_factory=list)
 
 
+def _cursor_message(item: dict[str, Any]) -> bool:
+    """A Cursor agent-transcript message: top-level role, content under message, no type."""
+    return (item.get("role") in {"user", "assistant"} and isinstance(item.get("message"), dict)
+            and "type" not in item and "sessionId" not in item)
+
+
 def _detect_client(records: list[tuple[int, int, str, Any]]) -> str:
     for _, _, _, item in records[:30]:
         if not isinstance(item, dict):
@@ -95,6 +101,8 @@ def _detect_client(records: list[tuple[int, int, str, Any]]) -> str:
             "user", "assistant", "system", "progress", "summary", "queue-operation"
         }:
             return "claude"
+        if _cursor_message(item):
+            return "cursor"
     raise AdapterError("Unrecognized transcript format; specify --client jsonl for an explicit generic import.")
 
 
@@ -221,6 +229,13 @@ def _normalize(item: Any, client: str, adapter_version: int = 1) -> tuple[str, s
         if kind in {"system", "summary", "progress", "queue-operation", "file-history-snapshot"}:
             return "system", content_text(item) or f"Claude {kind} metadata.", True
         return "system", f"Unsupported Claude record ({kind}); raw source retained.", False
+    if client == "cursor":
+        if _cursor_message(item):
+            # Cursor records text and tool_use parts; it does not persist tool results.
+            return item["role"], content_text(item["message"].get("content")), True
+        if kind == "turn_ended":
+            return "system", f"Cursor turn ended ({item.get('status', 'unknown')}).", True
+        return "system", f"Unsupported Cursor record ({kind}); raw source retained.", False
     role = item.get("role", "system")
     if role not in {"user", "assistant", "developer", "tool", "system"}:
         role = "system"
@@ -250,11 +265,13 @@ def parse_jsonl(
     offset = 0
     complete_lines = 0
     pending = 0
+    tail: tuple[int, bytes] | None = None
     errors: list[str] = []
     for ordinal, line in enumerate(data.splitlines(keepends=True), start=start_line + 1):
         terminated = line.endswith(b"\n")
         if not terminated and not final:
             pending = len(line)
+            tail = (ordinal, line)
             break
         try:
             # The JSONL separator is not part of its record. Other whitespace is.
@@ -283,10 +300,27 @@ def parse_jsonl(
         records.append((ordinal, offset, text, item))
     if errors:
         raise AdapterError("Malformed complete transcript records: " + "; ".join(errors[:20]))
+    tail_item = None
+    if tail is not None:
+        try:
+            tail_item = json.loads(tail[1].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
     if client == "auto":
-        client = _detect_client(records)
-    if client not in {"codex", "claude", "jsonl"}:
+        # A new Cursor chat's only record is its unterminated tail.
+        client = _detect_client(records + ([(0, 0, "", tail_item)] if isinstance(tail_item, dict) else []))
+    if client not in {"codex", "claude", "cursor", "jsonl"}:
         raise AdapterError(f"Unsupported JSONL client: {client}")
+    if client == "cursor" and isinstance(tail_item, dict):
+        # Cursor never terminates its last record; each later record starts with
+        # the newline. A JSON object cannot parse until fully written, so a valid
+        # tail is complete. When the next record arrives, that event is resent
+        # unchanged and counts as a duplicate.
+        ordinal, line = tail
+        offset += len(line)
+        complete_lines = ordinal - start_line
+        pending = 0
+        records.append((ordinal, offset, line.decode("utf-8"), tail_item))
 
     native_session = None
     native_cwd = None
@@ -313,6 +347,10 @@ def parse_jsonl(
     if client == "claude" and "subagents" in parts:
         parent_session = resolved_session
         resolved_session += ":subagent:" + Path(parts[-1]).stem
+    elif client == "cursor" and len(parts) > 2 and parts[-2] == "subagents":
+        # agent-transcripts/<parent>/subagents/<child>.jsonl; records carry no IDs.
+        parent_session = parts[-3]
+        resolved_session = parent_session + ":subagent:" + Path(parts[-1]).stem
     result = Transcript(
         client=client,
         session_id=resolved_session,

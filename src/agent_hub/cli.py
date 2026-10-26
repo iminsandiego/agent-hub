@@ -89,7 +89,7 @@ def setup(args: argparse.Namespace) -> int:
     result = setup_clients(
         config, config_path, clients=args.clients,
         codex_home=args.codex_home, claude_home=args.claude_home,
-        claude_mcp_file=args.claude_mcp_file, transport=args.transport,
+        claude_mcp_file=args.claude_mcp_file, cursor_home=args.cursor_home, transport=args.transport,
         hooks=not args.no_hooks, dry_run=args.dry_run,
     )
     # Skills come last, so a missing or unreachable repository never blocks the
@@ -363,11 +363,12 @@ def register_commands(subparsers) -> None:
     configure_parser.add_argument("--strict-scope", action="store_true", help="Require mapped source cwd evidence throughout each transcript")
     configure_parser.set_defaults(func=configure)
     setup_parser = subparsers.add_parser("setup", help="Merge MCP configuration and lifecycle hooks into local clients")
-    setup_parser.add_argument("--clients", nargs="+", choices=["codex", "claude", "t3"], default=["codex", "claude"])
+    setup_parser.add_argument("--clients", nargs="+", choices=["codex", "claude", "cursor", "t3"], default=["codex", "claude"])
     setup_parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     setup_parser.add_argument("--codex-home")
     setup_parser.add_argument("--claude-home")
     setup_parser.add_argument("--claude-mcp-file")
+    setup_parser.add_argument("--cursor-home", help="Cursor's settings folder (default ~/.cursor)")
     setup_parser.add_argument("--no-hooks", action="store_true")
     setup_parser.add_argument("--dry-run", action="store_true")
     setup_parser.add_argument("--skills-repo", metavar="URL_OR_PATH", help="Private skills repository to clone/update and install from (saved in client.json); 'none' to stop asking")
@@ -377,7 +378,7 @@ def register_commands(subparsers) -> None:
     check.set_defaults(func=doctor)
     importer = subparsers.add_parser("ingest", help="Import or queue existing native transcripts")
     importer.add_argument("paths", nargs="*")
-    importer.add_argument("--client", choices=["auto", "codex", "claude", "jsonl", "codex-app-server"], default="auto")
+    importer.add_argument("--client", choices=["auto", "codex", "claude", "cursor", "jsonl", "codex-app-server"], default="auto")
     importer.add_argument("--recursive", action="store_true")
     importer.add_argument("--project")
     importer.add_argument("--session-id")
@@ -388,7 +389,7 @@ def register_commands(subparsers) -> None:
     importer.set_defaults(func=ingest)
     planner = subparsers.add_parser("plan-import", help="Inventory selected JSONL sources locally without queueing or uploading")
     planner.add_argument("paths", nargs="+")
-    planner.add_argument("--client", choices=["auto", "codex", "claude", "jsonl"], default="auto")
+    planner.add_argument("--client", choices=["auto", "codex", "claude", "cursor", "jsonl"], default="auto")
     planner.add_argument("--final", action="store_true")
     planner.add_argument("--output", help="Write a new private inventory file; existing files are preserved")
     planner.set_defaults(func=plan_import)

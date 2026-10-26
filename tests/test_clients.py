@@ -125,6 +125,49 @@ def test_claude_tool_results_and_subagents_have_separate_identity(tmp_path):
     assert child.events[0]["event_id"] != normal.events[0]["event_id"]
 
 
+def cursor_bytes(*records):
+    # Cursor separates records with newlines but never terminates the last one.
+    return "\n".join(json.dumps(record, ensure_ascii=False) for record in records).encode("utf-8")
+
+
+CURSOR_USER = {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>Find the heater criteria</user_query>"}]}}
+CURSOR_REPLY = {"role": "assistant", "message": {"content": [{"type": "text", "text": "Searching."}, {"type": "tool_use", "name": "Grep", "input": {"pattern": "heater"}}]}}
+
+
+def test_cursor_transcripts_are_detected_and_keep_their_unterminated_tail():
+    parsed = parse_jsonl(cursor_bytes(CURSOR_USER, CURSOR_REPLY, {"type": "turn_ended", "status": "success"}),
+                         machine="m", path="agent-transcripts/chat-1/chat-1.jsonl")
+    assert parsed.client == "cursor"
+    assert parsed.session_id == "chat-1"
+    assert [e["role"] for e in parsed.events] == ["user", "assistant", "system"]
+    assert "Tool call: Grep" in parsed.events[1]["text"] and '"pattern": "heater"' in parsed.events[1]["text"]
+    assert parsed.events[2]["text"] == "Cursor turn ended (success)."
+    assert parsed.pending_bytes == 0 and parsed.unknown_types == []
+    # A new chat's only record is its tail; a half-written tail stays pending.
+    assert parse_jsonl(cursor_bytes(CURSOR_USER), machine="m", path="c.jsonl").client == "cursor"
+    partial = parse_jsonl(cursor_bytes(CURSOR_USER) + b'\n{"role": "assist', machine="m", path="c.jsonl")
+    assert len(partial.events) == 1 and partial.pending_bytes > 0
+
+
+def test_cursor_subagents_have_separate_identity():
+    child = parse_jsonl(cursor_bytes(CURSOR_USER), machine="m", path="agent-transcripts/parent/subagents/child.jsonl")
+    assert child.session_id == "parent:subagent:child"
+    assert child.parent_session_id == "parent"
+
+
+def test_cursor_tail_is_resent_unchanged_when_the_next_record_arrives(cfg, tmp_path):
+    source = tmp_path / "chat.jsonl"
+    source.write_bytes(cursor_bytes(CURSOR_USER))
+    service = RecordingService()
+    client = connection(cfg, service)
+    assert ingest_file(cfg, source, project="atlas", memory=client)["inserted"] == 1
+    source.write_bytes(cursor_bytes(CURSOR_USER, CURSOR_REPLY))
+    second = ingest_file(cfg, source, project="atlas", memory=client)
+    assert (second["inserted"], second["duplicates"]) == (1, 1)
+    assert {payload["client"] for payload in service.payloads} == {"cursor"}
+    assert len(service.events) == 2
+
+
 def test_project_mapping_boundaries_unicode_and_windows(cfg, tmp_path):
     cfg.mappings += [
         {"path": str(tmp_path / "work" / "日本語"), "project": "unicode"},
@@ -504,6 +547,23 @@ def test_native_http_configs_reference_env_only(cfg, tmp_path):
     codex = tomlkit.parse((c / "config.toml").read_text())
     assert codex["mcp_servers"]["agent-hub"]["bearer_token_env_var"] == cfg.token_env
     assert json.loads(a.read_text())["mcpServers"]["agent-hub"]["headers"]["Authorization"] == "Bearer ${TEST_AGENT_HUB_TOKEN}"
+
+
+def test_cursor_setup_merges_mcp_only_and_is_idempotent(cfg, tmp_path):
+    cursor_home = tmp_path / "cursor"
+    cursor_home.mkdir()
+    mcp = cursor_home / "mcp.json"
+    mcp.write_text(json.dumps({"mcpServers": {"JiraAeetes": {"command": "keep"}}}))
+    config_path = cfg.save(tmp_path / "client.json")
+    first = setup_clients(cfg, config_path, clients=["cursor"], cursor_home=cursor_home, executable=sys.executable)
+    assert first["changed"] and first["backups"]
+    assert any("--capture-path" in note and str(cursor_home / "projects") in note for note in first["notes"])
+    servers = json.loads(mcp.read_text())["mcpServers"]
+    assert servers["JiraAeetes"] == {"command": "keep"}
+    assert servers["agent-hub"]["type"] == "stdio" and "mcp" in servers["agent-hub"]["args"]
+    assert not (cursor_home / "hooks.json").exists()
+    assert setup_clients(cfg, config_path, clients=["cursor"], cursor_home=cursor_home, executable=sys.executable)["changed"] == []
+    assert "synthetic-test-token" not in mcp.read_text()
 
 
 def test_t3_setup_does_not_invent_native_settings(cfg, tmp_path):

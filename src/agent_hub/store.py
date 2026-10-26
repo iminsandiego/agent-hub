@@ -553,7 +553,7 @@ class Store:
         for alias in related_sessions or []:
             if not isinstance(alias, dict) or set(alias) != {"client", "session_id"}:
                 raise ValueError("Related sessions require client and session_id")
-            if alias["client"] not in {"codex", "claude", "t3", "generic", "chatgpt"}:
+            if alias["client"] not in {"codex", "claude", "cursor", "t3", "generic", "chatgpt"}:
                 raise ValueError("Invalid related client")
             _text(alias["session_id"], "related session_id")
             aliases.append("s_" + _hash([project, alias["client"], machine, alias["session_id"]]))
@@ -561,7 +561,7 @@ class Store:
         if parent_sessions is not None and (not isinstance(parent_sessions, list) or len(parent_sessions) > 8):
             raise ValueError("At most 8 parent sessions are allowed")
         for parent in parent_sessions or []:
-            if not isinstance(parent, dict) or set(parent) != {"client", "session_id"} or parent["client"] not in {"codex", "claude", "t3", "generic", "chatgpt"}:
+            if not isinstance(parent, dict) or set(parent) != {"client", "session_id"} or parent["client"] not in {"codex", "claude", "cursor", "t3", "generic", "chatgpt"}:
                 raise ValueError("Invalid parent session")
             _text(parent["session_id"], "parent session_id")
             parents.append("s_" + _hash([project, parent["client"], machine, parent["session_id"]]))
