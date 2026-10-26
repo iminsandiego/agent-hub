@@ -37,6 +37,8 @@ python3 -m venv .venv
 .venv/bin/agent-hub watch
 ```
 
+`setup` also asks once, in an interactive terminal, for an optional private skills repository (an SSH or HTTPS git URL, or an absolute path to an existing checkout). The answer is saved as `skills_repo` in `client.json` only; a blank answer is saved as declined and setup stops asking. Use `--skills-repo URL_OR_PATH` to set or change it without a prompt, or `--skills-repo none` to decline. See [skills](../skills/README.md) for what setup does with it.
+
 `configure` asks for the token using hidden terminal input when a token file or environment variable is unavailable. It saves the credential separately from `client.json`. If you transferred a token file, add `--token-file /absolute/private/machine.token`. Never put a token value in a shell argument. Select only the clients you use, for example `setup --clients codex`.
 
 The helper performs installation, configuration, setup for Codex and Claude, and connection checks:

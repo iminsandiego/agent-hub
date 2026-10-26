@@ -1,3 +1,11 @@
+## 0.1.14 private skills repository, October 25, 2026
+
+macOS, CPython 3.12: `PYTHONPATH=src python -m pytest -q` ran 427 tests, all passed (23 new in `tests/test_skills.py`: source validation, clone beside `client.json` and fast-forward update against a synthetic local origin, dry run, reported errors, prompt once / declined / never noninteractive, `--skills-repo` and `none`, reconfigure keeps the setting).
+
+Live check on the owner's Mac with a temporary copy of `client.json`: `setup --clients t3 --skills-repo <local checkout> --dry-run` ran the repository's `install.sh --dry-run`; the same command without `--dry-run` ran `install.sh` (every skill already linked, nothing changed) and saved `skills_repo`. Cloning a private repository over SSH was exercised only through the synthetic tests, not against GitHub. Not run on Linux or Windows.
+
+---
+
 ## 0.1.13 summary pilot and chat outcomes, October 20, 2026
 
 **Summary pilot.** GPT-6.1-Sol (low effort, isolated `codex exec` on the Codex subscription) summarized positions 147,456–161,728 (2026-10-04..20) of a copy of the pruned home archive with the 0.1.12 worker's rules: 2,146 calls, 25.9 million input tokens (65% cached), 268,000 output tokens, 1,770 model summaries and 802 free concatenations; 367 first answers too long and shortened; 10 nodes kept as excerpts; 6 answers rejected for quoting a `<budget:…>` tag that the records discussed (the check is narrowed in this release). Twenty broad questions about that period with 3–5 key points each (verified in the chats) were answered by Sonnet 5.5 (low) from the injected text and graded per key point by Sonnet 5.5 (medium): startup context alone 0% with or without summaries; startup plus first-prompt matches 14.8% without and 12.5% with summaries. A summary line covering thousands of records cannot carry one chat's outcome, so the tree summaries were not kept. Fact recall (25 questions) was 24/25 with and without them.
