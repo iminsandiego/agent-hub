@@ -45,6 +45,23 @@ def test_streaming_preserves_raw_ids_ordinals_blank_lines_and_checkpoint(fixture
     assert ingest_large_file(cfg,path,memory=memory)['inserted']==1
 
 
+def test_compressed_rollouts_stream_to_their_end_like_plain_ones(fixture):
+    import zstandard
+    path,data,cfg,store,memory=fixture
+    packed=path.with_name('rollout.jsonl.zst')
+    # Several frames: the first frame's declared size is far short of the file.
+    packed.write_bytes(b''.join(zstandard.ZstdCompressor().compress(data[i:i+300]) for i in range(0,len(data),300)))
+    # Codex compresses a rollout after it was captured: the new path adds nothing.
+    ingest_large_file(cfg,path,memory=memory)
+    result=ingest_large_file(cfg,packed,memory=memory)
+    expected=parse_jsonl(data,machine='machine',path=str(packed))
+    assert result['source_records']==len(expected.events)==store.stats('home')['events']==result['duplicates']
+    assert result['inserted']==0
+    cp=LocalState(cfg).checkpoint(file_key(cfg,packed,'auto'))
+    assert cp['offset']==len(data) and cp['prefix_sha']==hashlib.sha256(data).hexdigest() and cp['size']==packed.stat().st_size
+    assert ingest_large_file(cfg,packed,memory=memory)['inserted']==0
+
+
 def test_late_temporary_marker_and_malformed_tail_never_partially_upload(fixture):
     path,data,cfg,store,memory=fixture
     path.write_bytes(data+json.dumps({'type':'event_msg','payload':{'type':'user_message','message':'[temp] private'}}).encode()+b'\n')
@@ -102,3 +119,7 @@ def test_title_index_is_attributed_and_forgetting_removes_linked_label(tmp_path,
     store.create_project('work')
     index_title(config,source,transcript,Memory(),project='work')
     assert store.search('work','Named chat') and store.search('home','Named chat')==[]
+    # Codex keeps a compressed rollout under its original .jsonl path.
+    store.create_project('compressed')
+    index_title(config,source.with_name(source.name+'.zst'),transcript,Memory(),project='compressed')
+    assert store.search('compressed','Named chat')

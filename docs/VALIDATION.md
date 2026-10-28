@@ -1,3 +1,11 @@
+## Compressed Codex rollouts (unreleased), October 28, 2026
+
+Windows 11, CPython 3.12.10: `python -m pytest -q` ran 443 tests, 419 passed and 24 skipped (the POSIX-only skills tests). New in `tests/test_clients.py`: a two-frame `rollout.jsonl.zst` is discovered beside a plain file, captured with the same raw records as its decompressed JSONL, checkpointed at the decompressed length with the compressed file's size, not queued again by the next scan, and a file that is not zstd raises `ZstdError`. New in `tests/test_streaming.py`: a many-frame compressed file through the streaming path gives the same events and checkpoint as the plain fixture, and after the plain file was captured adds no record, only duplicates (bounding the read by the first frame's declared size captured 2 of 26 records and failed the test); the Codex title lookup matches a compressed rollout to the `.jsonl` path Codex recorded. `zstandard==0.25.0` is a new dependency; its `requirements.lock` hashes are PyPI's for all 99 release files.
+
+Survey of the owner's Windows work computer (file names, sizes and Codex's own thread index only): Codex had moved 2,815 of 2,830 threads to paginated history and compressed their rollouts, 6.8 GB compressed and 18.3 GB of JSONL (largest 2.4 GB); every frame declared its size. Before this change the client saw only the 15 uncompressed rollouts. Not yet run: capturing the compressed rollouts against the server.
+
+---
+
 ## 0.1.15 note deletion and filter, October 23, 2026
 
 New tests: `tests/test_store.py` deletes a rejected note that had superseded an active one and checks its statement, sources, keys, reviews (its own and the one naming it) and search entry are gone, the earlier note keeps its status without the link, its source event stays, candidate and active notes are refused, another project gets "not found", and the statement can be proposed afresh; the list filter matches every word case-insensitively, treats `%` and `_` as text, folds non-ASCII on both sides alike, and refuses more than eight words. `tests/test_security.py` checks the delete route needs authentication and an administrator, refuses a candidate (409), and returns 404 once the note is gone.
