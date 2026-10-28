@@ -115,6 +115,8 @@ Re-running `configure` preserves the machine ID and existing mappings/capture pa
 
 The environment variable named by `token_env` (default `AGENT_HUB_TOKEN`) takes precedence over `token_file`. `--save-token` stores the environment value or hidden prompt input in the separate token file. Client files are created with private POSIX modes; Windows protection depends on the containing directory's ACL. Keep state, credentials, native transcripts, and backups outside the source repository. Give each installation a distinct machine ID and server token; revoke a lost computer's token on the server.
 
+For a server whose HTTPS certificate comes from a private CA, `agent-hub configure --ca-file /absolute/path/hub-ca.crt` saves `ca_file`. The client (hooks, `watch`, `ingest`, `doctor` and the stdio MCP gateway) then trusts that CA alone for the service URL; other TLS in the process, and the system's certificate stores, are unchanged, so there is no need to set `SSL_CERT_FILE`. `--ca-file none` clears it. A native HTTP MCP client needs the CA in its own mechanism: Claude Code reads `NODE_EXTRA_CA_CERTS`.
+
 ## What setup changes
 
 `setup --dry-run` reports planned paths without writing. Normal setup parses and validates every selected configuration before making changes, preserves unrelated MCP entries and hook groups, and writes a private timestamped backup of each existing file it changes. Repeated setup with the same inputs makes no duplicate handlers. A manually changed or unrelated entry already named `agent-hub` produces a visible conflict.

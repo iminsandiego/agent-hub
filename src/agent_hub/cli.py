@@ -52,6 +52,11 @@ def configure(args: argparse.Namespace) -> int:
     if token_file and Path(token_file).resolve() == target:
         raise ClientError("The token file must be separate from client.json.")
     paths = list(dict.fromkeys((existing.capture_paths if existing else []) + (args.capture_path or [])))
+    ca_file = existing.ca_file if existing else None
+    if args.ca_file:
+        ca_file = None if args.ca_file == "none" else str(Path(args.ca_file).expanduser().resolve())
+        if ca_file and not Path(ca_file).is_file():
+            raise ClientError(f"CA file not found: {ca_file}")
     config = ClientConfig(
         url=args.url or (existing.url if existing else ""),
         machine_id=args.machine_id or (existing.machine_id if existing else "machine-" + uuid.uuid4().hex[:16]),
@@ -66,6 +71,7 @@ def configure(args: argparse.Namespace) -> int:
         t3_database=args.t3_database or (existing.t3_database if existing else None),
         codex_database=args.codex_database or (existing.codex_database if existing else None),
         skills_repo=existing.skills_repo if existing else None,
+        ca_file=ca_file,
     )
     # Validate the entire prospective configuration before rotating a credential.
     # An invalid URL or project mapping must leave a working installation intact.
@@ -109,7 +115,7 @@ def setup(args: argparse.Namespace) -> int:
 
 def doctor(args: argparse.Namespace) -> int:
     config = config_for(args)
-    report: dict[str, Any] = {"url": config.url, "machine_id": config.machine_id, "tls_verification": True, "versions": {}}
+    report: dict[str, Any] = {"url": config.url, "machine_id": config.machine_id, "tls_verification": True, "ca_file": config.ca_file, "versions": {}}
     ok = True
     try:
         config.token()
@@ -361,6 +367,7 @@ def register_commands(subparsers) -> None:
     configure_parser.add_argument("--domain", choices=["home", "work"])
     configure_parser.add_argument("--allow-project", action="append", help="Replace the profile project allowlist; repeat for every allowed project")
     configure_parser.add_argument("--strict-scope", action="store_true", help="Require mapped source cwd evidence throughout each transcript")
+    configure_parser.add_argument("--ca-file", help="PEM CA certificate trusted (alone) for the service URL, for a private-CA HTTPS server; 'none' clears it")
     configure_parser.set_defaults(func=configure)
     setup_parser = subparsers.add_parser("setup", help="Merge MCP configuration and lifecycle hooks into local clients")
     setup_parser.add_argument("--clients", nargs="+", choices=["codex", "claude", "cursor", "t3"], default=["codex", "claude"])
