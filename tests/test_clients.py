@@ -283,6 +283,101 @@ def test_config_and_secret_cannot_be_same_relative_file(cfg, tmp_path, monkeypat
     assert path.read_bytes() == before
 
 
+def test_configure_ca_file_is_kept_and_cleared(cfg, tmp_path):
+    ca = tmp_path / "hub-ca.crt"
+    ca.write_text("synthetic\n")
+    path = cfg.save(tmp_path / "client.json")
+    assert main(["--config", str(path), "configure", "--ca-file", str(ca), "--no-prompt"]) == 0
+    assert ClientConfig.load(path).ca_file == str(ca.resolve())
+    assert main(["--config", str(path), "configure", "--url", "https://other.example.com", "--no-prompt"]) == 0
+    assert ClientConfig.load(path).ca_file == str(ca.resolve())
+    assert main(["--config", str(path), "configure", "--ca-file", str(tmp_path / "missing.crt"), "--no-prompt"]) == 1
+    assert main(["--config", str(path), "configure", "--ca-file", "none", "--no-prompt"]) == 0
+    assert ClientConfig.load(path).ca_file is None
+    with pytest.raises(ClientError):
+        ClientConfig(url="https://example.com", machine_id="machine", ca_file="relative.crt")
+
+
+def _private_ca_server(tmp_path):
+    """An HTTPS /health server on localhost whose certificate a fresh private CA signs."""
+    import datetime
+    import ipaddress
+    import ssl
+
+    x509 = pytest.importorskip("cryptography.x509")
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    window = dict(not_valid_before=now - datetime.timedelta(minutes=5), not_valid_after=now + datetime.timedelta(days=1))
+
+    def build(subject, issuer, public_key, signer, *extensions):
+        builder = x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(public_key) \
+            .serial_number(x509.random_serial_number()).not_valid_before(window["not_valid_before"]) \
+            .not_valid_after(window["not_valid_after"])
+        for extension, critical in extensions:
+            builder = builder.add_extension(extension, critical=critical)
+        return builder.sign(signer, hashes.SHA256())
+
+    ca_key, server_key = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Synthetic Hub CA")])
+    ca_cert = build(ca_name, ca_name, ca_key.public_key(), ca_key,
+                    (x509.BasicConstraints(ca=True, path_length=0), True),
+                    (x509.KeyUsage(False, False, False, False, False, True, True, False, False), True))
+    server_cert = build(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]), ca_name,
+                        server_key.public_key(), ca_key,
+                        (x509.SubjectAlternativeName([x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False))
+    pem = serialization.Encoding.PEM
+    ca_path, cert_path, key_path = tmp_path / "hub-ca.crt", tmp_path / "server.crt", tmp_path / "server.key"
+    ca_path.write_bytes(ca_cert.public_bytes(pem))
+    cert_path.write_bytes(server_cert.public_bytes(pem))
+    key_path.write_bytes(server_key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, ca_path
+
+
+def test_ca_file_trusts_a_private_hub_ca(tmp_path, monkeypatch):
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    server, ca_path = _private_ca_server(tmp_path)
+    try:
+        url = f"https://localhost:{server.server_address[1]}"
+        plain = MemoryClient(ClientConfig(url=url, machine_id="machine"))
+        try:
+            with pytest.raises(httpx.ConnectError):
+                plain.http.get("health")
+        finally:
+            plain.close()
+        trusted = MemoryClient(ClientConfig(url=url, machine_id="machine", ca_file=str(ca_path)))
+        try:
+            assert trusted.http.get("health").json() == {"status": "ok"}
+        finally:
+            trusted.close()
+        with pytest.raises(ClientError):
+            MemoryClient(ClientConfig(url=url, machine_id="machine", ca_file=str(tmp_path / "missing.crt")))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.parametrize("overrides", [{"project": "Other Project"}, {"capture_paths": [""]}, {"mappings": [{"path": "/valid", "project": "../bad"}]}])
 def test_invalid_capture_configuration_fails_early(overrides):
     with pytest.raises(ClientError):

@@ -1,3 +1,11 @@
+## Client `ca_file` for a private-CA server (unreleased), October 27, 2026
+
+Windows 11, CPython 3.12.10: `python -m pytest -q` ran 437 tests, 413 passed and 24 skipped (the POSIX-only skills tests). New in `tests/test_clients.py`: `configure --ca-file` saves the resolved path, keeps it on a later `configure`, refuses a missing file and clears with `none`; a relative `ca_file` is rejected; against a local HTTPS server whose certificate a freshly generated synthetic CA signs, the client without `ca_file` fails verification and with it succeeds, and an unreadable `ca_file` is a `ClientError`.
+
+Live check on the owner's Windows work computer against the team server's HTTPS endpoint (private CA, `SSL_CERT_FILE` and `SSL_CERT_DIR` unset): `context` and `search` returned results, a `UserPromptSubmit` hook payload returned matches, and `watch --once` uploaded the queued chats (one job still refused with the known 409 for a Cursor chat ID present in two workspace folders). Not run: macOS or Linux clients, the stdio MCP gateway inside Codex.
+
+---
+
 ## Cursor client (unreleased), October 26, 2026
 
 Windows 11, CPython 3.12.10: `python -m pytest -q` ran 435 tests, 411 passed and 24 skipped; `python -m build` built the sdist and wheel. New in `tests/test_clients.py`: detection and rendering (text, tool calls, `turn_ended`); an unterminated Cursor record kept only once its file has settled, a half-written one never; a partial first Codex or Claude record still raises and leaves no checkpoint; generic `{role, message}` exports are not taken for Cursor; subagent identity, including a Windows path and an explicit `--session-id`; a settled tail resent as a duplicate when the chat grows; `<user_query>` prompts classified as the user's words, `[temp]` inside it detected, `turn_ended` as bookkeeping; `setup --clients cursor` merging only `mcp.json`, idempotently, and refusing HTTP. `CLASSIFIER_VERSION` is now 2; run `agent-hub rebuild` on each project before `prune`.
