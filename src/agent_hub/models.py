@@ -21,7 +21,7 @@ class EventInput(WireModel):
 
 
 class RelatedSession(WireModel):
-    client: Literal["codex", "claude", "t3", "generic", "chatgpt"]
+    client: Literal["codex", "claude", "cursor", "t3", "generic", "chatgpt"]
     session_id: str = Field(min_length=1, max_length=256)
 
 
@@ -31,7 +31,7 @@ class SessionPrivacyInput(WireModel):
 
 class IngestInput(WireModel):
     project: ProjectID
-    client: Literal["codex", "claude", "t3", "generic", "chatgpt"]
+    client: Literal["codex", "claude", "cursor", "t3", "generic", "chatgpt"]
     machine: str = Field(min_length=1, max_length=128)
     session_id: str = Field(min_length=1, max_length=256)
     events: list[EventInput] = Field(min_length=1, max_length=500)

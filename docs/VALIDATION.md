@@ -1,3 +1,13 @@
+## Cursor client (unreleased), October 26, 2026
+
+Windows 11, CPython 3.12.10: `python -m pytest -q` ran 435 tests, 411 passed and 24 skipped; `python -m build` built the sdist and wheel. New in `tests/test_clients.py`: detection and rendering (text, tool calls, `turn_ended`); an unterminated Cursor record kept only once its file has settled, a half-written one never; a partial first Codex or Claude record still raises and leaves no checkpoint; generic `{role, message}` exports are not taken for Cursor; subagent identity, including a Windows path and an explicit `--session-id`; a settled tail resent as a duplicate when the chat grows; `<user_query>` prompts classified as the user's words, `[temp]` inside it detected, `turn_ended` as bookkeeping; `setup --clients cursor` merging only `mcp.json`, idempotently, and refusing HTTP. `CLASSIFIER_VERSION` is now 2; run `agent-hub rebuild` on each project before `prune`.
+
+Record survey of the owner's 51 Cursor agent transcripts (record shapes and wrapper tag names only): every message record has exactly `role` and `message`; user prompts are wrapped in `<user_query>`, sometimes after a `<timestamp>` block. 22 files end with a newline (19 of them with a `turn_ended` record, 3 with an assistant record); the 29 files without a final newline were all last written February to May 2026 and end with an assistant record. The Cursor version that wrote each file was not recorded.
+
+Live check on the owner's Windows work computer: `plan-import ~/.cursor/projects` classified all 51 as `cursor`, 51 ready, no unknown record types, 13 subagents with their own identity. With the first version of this branch deployed to the owner's Linux work server, the Windows watcher uploaded the transcripts with client `cursor`. One chat ID present in two Cursor workspace folders with different content was refused with HTTP 409 and stays queued. Not run: a live Cursor chat being written while the watcher runs, the `agent-hub` MCP server inside Cursor itself, macOS or Linux clients.
+
+---
+
 ## 0.1.14 private skills repository, October 25, 2026
 
 macOS, CPython 3.12: `PYTHONPATH=src python -m pytest -q` ran 427 tests, all passed (23 new in `tests/test_skills.py`: source validation, clone beside `client.json` and fast-forward update against a synthetic local origin, dry run, reported errors, prompt once / declined / never noninteractive, `--skills-repo` and `none`, reconfigure keeps the setting).

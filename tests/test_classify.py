@@ -3,7 +3,7 @@ import json
 import pytest
 
 from agent_hub.classify import (
-    BOOKKEEPING, DERIVED, INJECTED, METADATA, TITLE, TOOL, chat_title, classify_event, classify_session, excluded_session,
+    BOOKKEEPING, CLASSIFIER_VERSION, DERIVED, INJECTED, METADATA, TITLE, TOOL, chat_title, classify_event, classify_session, excluded_session,
 )
 from agent_hub.store import Store
 
@@ -148,7 +148,7 @@ def test_prune_keeps_records_a_note_cites(store):
         cited = con.execute("SELECT id FROM events WHERE external_event_id='1'").fetchone()[0]
     store.add_memory("alpha", "A decision", "decision", [cited])
     with sqlite3.connect(store.path) as con:
-        con.execute("INSERT OR REPLACE INTO derived_versions VALUES('alpha','classifier',1)")
+        con.execute("INSERT OR REPLACE INTO derived_versions VALUES('alpha','classifier',?)", (CLASSIFIER_VERSION,))
     plan = store.prune("alpha")
     assert plan["records_removed"] == 0 and plan["kept_because_a_note_cites_them"] == 1
 

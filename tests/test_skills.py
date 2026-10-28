@@ -115,7 +115,7 @@ def test_errors_are_reported_not_raised(tmp_path):
 
 def _setup_args(config_path, **overrides):
     values = dict(config=str(config_path), clients=["t3"], codex_home=None, claude_home=None,
-                  claude_mcp_file=None, transport="stdio", no_hooks=True, dry_run=False, skills_repo=None)
+                  claude_mcp_file=None, cursor_home=None, transport="stdio", no_hooks=True, dry_run=False, skills_repo=None)
     values.update(overrides)
     return argparse.Namespace(**values)
 
