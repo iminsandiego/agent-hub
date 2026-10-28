@@ -1043,13 +1043,21 @@ class Store:
                 con.execute("INSERT INTO memory_keys VALUES(?,?,?,?)", (project, idempotency_key, identifier, identity))
             return self._memory(con, project, identifier)
 
-    def list_memories(self, project: str, status: str = "active", limit: int = 100) -> list[dict[str, Any]]:
+    def list_memories(self, project: str, status: str = "active", limit: int = 100, query: str | None = None) -> list[dict[str, Any]]:
+        """List memories newest first; query keeps those whose statement contains every word.
+
+        SQLite's lower() folds ASCII only, so both sides are folded there: "Élan" finds "Élan", not "élan"."""
         if status not in _STATUSES:
             raise ValueError("Invalid memory status")
         _limit(limit, "limit")
+        terms = (query or "").split()
+        if len(terms) > 8:
+            raise ValueError("A filter can have at most 8 words")
         with self._read() as con:
             self._project(con, project)
-            identifiers = con.execute("SELECT id FROM memories WHERE project=? AND status=? ORDER BY updated_at DESC,id LIMIT ?", (project, status, limit)).fetchall()
+            identifiers = con.execute(
+                "SELECT id FROM memories WHERE project=? AND status=?" + " AND instr(lower(statement),lower(?))>0" * len(terms)
+                + " ORDER BY updated_at DESC,id LIMIT ?", (project, status, *terms, limit)).fetchall()
             return [self._memory(con, project, row["id"]) for row in identifiers]
 
     def get_memory(self, project: str, memory_id: str) -> dict[str, Any]:
@@ -1087,6 +1095,31 @@ class Store:
                 con.execute("UPDATE memories SET status=?,updated_at=? WHERE project=? AND id=?", (status, now, project, memory_id))
                 con.execute("INSERT INTO memory_reviews(project,memory_id,previous_status,status,related_memory_id,actor,created_at) VALUES(?,?,?,?,?,?,?)", (project, memory_id, memory["status"], status, supersedes, actor, now))
             return self._memory(con, project, memory_id, reviews=True)
+
+    def delete_memory(self, project: str, memory_id: str) -> dict[str, Any]:
+        """Erase one rejected memory: its statement, sources, idempotency keys and review history.
+
+        Only a rejected memory can be deleted, so an active note is retired first.
+        Notes it replaced or that replaced it keep their status and lose the link.
+        Nothing remembers the statement afterwards, so an agent may propose it again.
+        """
+        with self._connection(write=True) as con:
+            self._project(con, project)
+            memory = self._memory(con, project, memory_id)
+            if memory["status"] != "rejected":
+                raise ValueError("Only a rejected memory can be deleted; reject or retire it first")
+            if self.fts_enabled:
+                con.execute("DELETE FROM history_fts WHERE project=? AND item_type='memory' AND item_id=?", (project, memory_id))
+            con.execute("UPDATE memories SET supersedes=NULL WHERE project=? AND supersedes=?", (project, memory_id))
+            con.execute("UPDATE memories SET superseded_by=NULL WHERE project=? AND superseded_by=?", (project, memory_id))
+            con.execute("DELETE FROM memory_reviews WHERE project=? AND (memory_id=? OR related_memory_id=?)", (project, memory_id, memory_id))
+            for table in ("memory_keys", "memory_sources"):
+                con.execute(f"DELETE FROM {table} WHERE project=? AND memory_id=?", (project, memory_id))
+            con.execute("DELETE FROM memories WHERE project=? AND id=?", (project, memory_id))
+            # FTS segments can retain obsolete postings until merged.
+            if self.fts_enabled:
+                con.execute("INSERT INTO history_fts(history_fts) VALUES('optimize')")
+            return {"project": project, "memory_id": memory_id, "deleted": True}
 
     @staticmethod
     def _insert_node(con: sqlite3.Connection, project: str, node: dict[str, Any]) -> None:

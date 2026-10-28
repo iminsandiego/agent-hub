@@ -2,7 +2,7 @@
 
 A private home for your coding agents' shared memory, with one repository for the service, computer setup, and future MCP servers, plugins, and skills.
 
-**Version 0.1.14.** An authenticated Python service with SQLite history, exact retrieval of captured records, project-scoped search, a binary summary tree, a browser memory view with password sign-in, client capture and setup tools, and optional bounded model summaries. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md), which separates what was tested in development from what needs checking on your own computers.
+**Version 0.1.15.** An authenticated Python service with SQLite history, exact retrieval of captured records, project-scoped search, a binary summary tree, a browser memory view with password sign-in, client capture and setup tools, and optional bounded model summaries. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md), which separates what was tested in development from what needs checking on your own computers.
 
 **Home/work separation:** deploy an independent server per domain, with its own projects and tokens. Servers refuse projects outside their domain, client profiles carry strict project allowlists, and the local backfill planner checks transcripts against them. Read [the deployment and ingestion design](docs/DOMAINS_AND_INGESTION.md) before configuring a computer used for both.
 
@@ -15,7 +15,7 @@ A private home for your coding agents' shared memory, with one repository for th
 - Add matching history to a session's first prompt through a hook: the matching records, at most two per chat and each naming its chat, plus the start of that chat's latest answer. Later prompts and harness notices add nothing, and an outage adds nothing rather than delaying the prompt.
 - Search conversation text with SQLite FTS5 (with a labelled substring fallback), ranking conversation ahead of injected text, tool output and derived threads. Hits and context lines carry `lo+n` references that `memory_zoom` opens, down to the exact captured source.
 - Keep only content: records are classified as conversation, tool, injected, derived, title, metadata or bookkeeping. The server discards bookkeeping and approval-reviewer threads at ingest; `prune` removes those captured earlier.
-- Keep durable memories as reviewable candidates. Activation and supersession are explicit, audited administrative actions; a remembered claim is never proof of a passed test.
+- Keep durable memories as reviewable candidates. Activation and supersession are explicit, audited administrative actions; a remembered claim is never proof of a passed test. In the browser, an administrator can filter notes by their words, retire a note, and delete a rejected one permanently.
 - Capture through local hooks and an independent uploader. An unavailable server never blocks the coding session or loses the upload queue; jobs whose source never appears are set aside after a day instead of retrying forever.
 - Support temporary chats and explicit forgetting, which also resets model-written summaries that may have copied from a forgotten chat. See [the user guide](docs/TEMPORARY_CHATS.md).
 - Run without a model API key. Optional model summaries and memory proposals run under a hard per-run call budget.
@@ -127,6 +127,7 @@ Tests use synthetic data only. `requirements.lock` records the tested runtime de
 
 | Version | Highlights |
 | --- | --- |
+| [0.1.15](docs/RELEASE_0.1.15.md) | Delete a rejected note permanently; filter notes by their words; the context preview defaults to the startup size |
 | [0.1.14](docs/RELEASE_0.1.14.md) | Setup can clone or update a private skills repository named only in `client.json` and run its installer |
 | [0.1.13](docs/RELEASE_0.1.13.md) | First-prompt matches bring each chat's latest answer; setup keeps Codex tool approvals; harness notices don't use up the first prompt |
 | [0.1.12](docs/RELEASE_0.1.12.md) | Record classes, no bookkeeping at ingest, `prune`, recent chats in the startup context, first-prompt history hook |

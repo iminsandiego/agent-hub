@@ -405,9 +405,9 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
 
     @app.get("/v1/projects/{project}/memories")
     async def memories(project: str, status: Literal["candidate", "active", "rejected", "superseded"] = "active",
-                       limit: int = Query(default=100, ge=1, le=500)):
+                       limit: int = Query(default=100, ge=1, le=500), query: str | None = Query(default=None, max_length=200)):
         authorize(project)
-        return await run(store.list_memories, project, status, limit)
+        return await run(store.list_memories, project, status, limit, query)
 
     @app.get("/v1/projects/{project}/memories/{record_id}")
     async def memory(project: str, record_id: str):
@@ -423,6 +423,13 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         if not principal.admin:
             raise PermissionError("Administrative token required")
         return await run(store.review_memory, project, record_id, **value.model_dump(), actor=principal.id)
+
+    @app.delete("/v1/projects/{project}/memories/{record_id}")
+    async def delete_memory(project: str, record_id: str):
+        principal = authorize(project, "admin")
+        if not principal.admin:
+            raise PermissionError("Administrative token required")
+        return await run(store.delete_memory, project, record_id)
 
     @app.get("/v1/projects/{project}/stats")
     async def stats(project: str):

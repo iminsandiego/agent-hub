@@ -194,6 +194,55 @@ def test_memory_dedup_keys_and_review_supersession_are_audited(store):
             store.review_memory("alpha", replacement["id"], bad_status)
 
 
+def test_deleting_a_rejected_memory_erases_it_and_unlinks_its_neighbours(store):
+    archived = ingest(store, [event(0, "controller deletion source")])
+    old = store.add_memory("alpha", "Earlier controller note")
+    store.review_memory("alpha", old["id"], "active")
+    note = store.add_memory("alpha", "Mistaken controller note", source_event_ids=archived["event_ids"], idempotency_key="mistake")
+    store.review_memory("alpha", note["id"], "active", supersedes=old["id"])
+    candidate = store.add_memory("alpha", "Pending controller note")
+    for kept in (candidate, note):  # a candidate and an active note must be rejected first
+        with pytest.raises(ValueError, match="rejected"):
+            store.delete_memory("alpha", kept["id"])
+    store.review_memory("alpha", note["id"], "rejected")
+    with pytest.raises(KeyError):
+        store.delete_memory("beta", note["id"])
+
+    assert store.delete_memory("alpha", note["id"]) == {"project": "alpha", "memory_id": note["id"], "deleted": True}
+    with pytest.raises(KeyError):
+        store.get_memory("alpha", note["id"])
+    with pytest.raises(KeyError):
+        store.delete_memory("alpha", note["id"])
+    earlier = store.get_memory("alpha", old["id"])
+    assert earlier["status"] == "superseded" and earlier["superseded_by"] is None
+    assert [review["status"] for review in earlier["reviews"]] == ["active"]  # the review naming the deleted note is gone
+    assert store.get_event("alpha", archived["event_ids"][0])["text"] == "controller deletion source"
+    with sqlite3.connect(store.path) as con:
+        for table in ("memory_sources", "memory_keys", "memory_reviews"):
+            assert con.execute(f"SELECT count(*) FROM {table} WHERE memory_id=?", (note["id"],)).fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM memory_reviews WHERE related_memory_id=?", (note["id"],)).fetchone()[0] == 0
+        if store.fts_enabled:
+            assert con.execute("SELECT count(*) FROM history_fts WHERE item_id=?", (note["id"],)).fetchone()[0] == 0
+    # Nothing remembers the statement or its idempotency key, so it can be proposed afresh.
+    again = store.add_memory("alpha", "Mistaken controller note", idempotency_key="mistake")
+    assert again["id"] != note["id"] and again["status"] == "candidate"
+
+
+def test_memory_list_filter_matches_every_word_case_insensitively(store):
+    for statement in ("Deploy with the Blue script", "Blue team owns the deploy", "Unrelated green note"):
+        store.add_memory("alpha", statement)
+    assert {item["statement"] for item in store.list_memories("alpha", "candidate", query="blue")} == {
+        "Deploy with the Blue script", "Blue team owns the deploy"}
+    assert [item["statement"] for item in store.list_memories("alpha", "candidate", query="DEPLOY script")] == ["Deploy with the Blue script"]
+    assert store.list_memories("alpha", "candidate", query="100%_") == []
+    store.add_memory("alpha", "Élan vital")
+    assert [item["statement"] for item in store.list_memories("alpha", "candidate", query="Élan")] == ["Élan vital"]
+    assert len(store.list_memories("alpha", "candidate", query="  ")) == 4
+    assert store.list_memories("alpha", "active", query="blue") == []
+    with pytest.raises(ValueError):
+        store.list_memories("alpha", "candidate", query=" ".join("w" * 9))
+
+
 def test_cross_project_supersession_rolls_back_activation(store):
     old = store.add_memory("alpha", "alpha old")
     store.review_memory("alpha", old["id"], "active")
