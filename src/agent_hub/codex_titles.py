@@ -10,8 +10,10 @@ def index_title(config, source: Path, transcript, memory, *, project=None):
     database=Path(config.codex_database).expanduser().resolve()
     con=sqlite3.connect(database.as_uri()+'?mode=ro',uri=True)
     try:
-        row=con.execute('SELECT id,name,title FROM threads WHERE id=? AND rollout_path=?',
-                        (transcript.session_id,str(source))).fetchone()
+        # Codex keeps a compressed rollout's original .jsonl path.
+        named=str(source).removesuffix('.zst')
+        row=con.execute('SELECT id,name,title FROM threads WHERE id=? AND rollout_path IN (?,?)',
+                        (transcript.session_id,str(source),named)).fetchone()
     finally:con.close()
     if not row or not (row[1] or row[2]):return
     native,name,title=row

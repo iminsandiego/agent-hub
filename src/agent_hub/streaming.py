@@ -6,11 +6,14 @@ from pathlib import Path
 
 from .adapters import parse_jsonl, tail_settled
 from .privacy import temporary_message
+from .sources import compressed, open_transcript
 
 
-def chunks(source: Path, size: int, budget: int = 512_000):
+def chunks(source: Path, size: int | None, budget: int = 512_000):
+    """Whole-line chunks of the first ``size`` bytes, or of all of them (None)."""
+    size = float("inf") if size is None else size
     base = ordinal = 0
-    with source.open("rb") as stream:
+    with open_transcript(source) as stream:
         while base < size:
             lines = []; length = 0
             while base + length < size:
@@ -33,17 +36,18 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
     from .client import ClientError, LocalState, MemoryClient, _batches, file_key
     state = state or LocalState(config)
     stat = source.stat()
+    length = None if compressed(source) else stat.st_size  # a compressed file is read to its end
     key = file_key(config, source, client, session_id)
     previous = state.checkpoint(key)
     offset = previous["offset"] if previous else 0
-    if offset > stat.st_size:
+    if length is not None and offset > length:
         raise ClientError("Transcript was truncated; source retained for review")
     base_transcript = None; target = None; identity = session_id
     prior_hash = hashlib.sha256(); unknown = set(); record_count = 0
     pending_bytes = complete_bytes = 0; first_event = None
     # Preflight the whole snapshot before uploading: malformed records, routing
     # violations and a temporary marker near the end cannot cause partial capture.
-    for base, ordinal, data in chunks(source, stat.st_size):
+    for base, ordinal, data in chunks(source, length):
         part = parse_jsonl(data, client=client if base_transcript is None else base_transcript.client,
                            machine=config.machine_id, path=str(source), session_id=identity,
                            cwd=cwd if base_transcript is None else base_transcript.cwd,
@@ -77,7 +81,7 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
             # Establish the durable exclusion even if no records are pending.
             receipt = connection.ingest(target, base_transcript, [first_event])
             suppressed = bool(receipt.get("suppressed"))
-        for base, ordinal, data in chunks(source, stat.st_size):
+        for base, ordinal, data in chunks(source, length):
             part = parse_jsonl(data, client=base_transcript.client, machine=config.machine_id,
                                path=str(source), session_id=identity, cwd=base_transcript.cwd,
                                final=final, start_line=ordinal, adapter_version=adapter_version, settled=tail_settled(stat))

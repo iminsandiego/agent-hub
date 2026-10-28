@@ -20,6 +20,7 @@ from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 from .adapters import ADAPTER_VERSION, AdapterError, SourceUnavailable, Transcript, export_codex_thread, parse_jsonl, tail_settled
+from .sources import compressed, read_transcript, size_hint, transcript_files
 
 
 class ClientError(ValueError):
@@ -524,9 +525,9 @@ class LocalState:
         return dict(row) if row else None
 
     def save_checkpoint(self, identifier: str, data: bytes, offset: int, session: str, project: str, stat: os.stat_result,
-                        *, adapter_version: int = 1) -> None:
+                        *, adapter_version: int = 1, size: int | None = None) -> None:
         self.save_checkpoint_hash(identifier, hashlib.sha256(data[:offset]).hexdigest(), offset, session, project, stat,
-                                  size=len(data), adapter_version=adapter_version)
+                                  size=len(data) if size is None else size, adapter_version=adapter_version)
 
     def save_checkpoint_hash(self, identifier: str, prefix_sha: str, offset: int, session: str,
                              project: str, stat: os.stat_result, *, size: int | None = None, adapter_version: int = 1) -> None:
@@ -615,12 +616,14 @@ def _ingest_file_version(
     config: ClientConfig, source: Path, adapter_version: int, *, client: str, project: str | None, cwd: str | None,
     session_id: str | None, final: bool, memory: MemoryClient | None, state: LocalState,
 ) -> dict[str, Any]:
-    if source.stat().st_size > 16_000_000:
+    if size_hint(source) > 16_000_000:
         from .streaming import ingest_large_file
         return ingest_large_file(config, source, client=client, project=project, cwd=cwd, session_id=session_id,
                                  final=final, memory=memory, state=state, adapter_version=adapter_version)
-    data = source.read_bytes()
+    data = read_transcript(source)
     stat = source.stat()
+    # A scan compares the checkpoint with the file on disk: a compressed file's own size.
+    size = stat.st_size if compressed(source) else None
     transcript = parse_jsonl(data, client=client, machine=config.machine_id, path=str(source), session_id=session_id,
                              cwd=cwd, final=final, adapter_version=adapter_version, settled=tail_settled(stat))
     target = config.resolve_project(transcript.cwd, project)
@@ -646,11 +649,11 @@ def _ingest_file_version(
             inserted += int(receipt.get("inserted", 0))
             duplicates += int(receipt.get("duplicates", 0))
             offset = batch[-1]["_end_offset"]
-            state.save_checkpoint(identifier, data, offset, transcript.session_id, target, stat, adapter_version=adapter_version)
+            state.save_checkpoint(identifier, data, offset, transcript.session_id, target, stat, adapter_version=adapter_version, size=size)
             if receipt.get("suppressed") or receipt.get("excluded"):
                 break  # the server keeps none of this session
         # Blank separator lines are safe to checkpoint after all events commit.
-        state.save_checkpoint(identifier, data, transcript.complete_bytes, transcript.session_id, target, stat, adapter_version=adapter_version)
+        state.save_checkpoint(identifier, data, transcript.complete_bytes, transcript.session_id, target, stat, adapter_version=adapter_version, size=size)
         from .codex_titles import index_title
         index_title(config, source, transcript, connection, project=target)
     finally:
@@ -807,7 +810,7 @@ def discover_paths(config: ClientConfig, state: LocalState) -> int:
     queued = 0
     for configured in config.capture_paths:
         root = Path(configured).expanduser().resolve()
-        candidates = [root] if root.is_file() else _oldest_first(root.rglob("*.jsonl")) if root.is_dir() else []
+        candidates = [root] if root.is_file() else _oldest_first(transcript_files(root)) if root.is_dir() else []
         for candidate in candidates:
             try:
                 resolved = candidate.resolve()

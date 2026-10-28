@@ -911,6 +911,37 @@ def test_discovered_transcripts_queue_oldest_first(cfg, tmp_path):
     assert queued == ["zeta.jsonl", "alpha.jsonl", "mid.jsonl"]
 
 
+def test_compressed_codex_rollouts_are_captured_like_plain_ones(cfg, tmp_path):
+    import zstandard
+    root = tmp_path / "sessions"
+    root.mkdir()
+    data = jsonl(*codex_records(tmp_path / "work"))
+    plain = root / "plain.jsonl"
+    plain.write_bytes(data)
+    packed = root / "rollout.jsonl.zst"
+    # Two frames: a file is read to its end, not to its first frame's declared size.
+    packed.write_bytes(b"".join(zstandard.ZstdCompressor().compress(part) for part in data.splitlines(keepends=True)))
+    cfg.capture_paths = [str(root)]
+    state = LocalState(cfg)
+    assert discover_paths(cfg, state) == 2
+    service = RecordingService()
+    client = connection(cfg, service)
+    result = ingest_file(cfg, packed, memory=client, state=state)
+    assert (result["inserted"], result["source_records"]) == (2, 2)
+    expected = parse_jsonl(data, machine="test-machine", path=str(packed.resolve()))
+    assert [event["raw"] for event in service.events.values()] == [event["raw"] for event in expected.events]
+    assert ingest_file(cfg, packed, memory=client, state=state)["inserted"] == 0
+    checkpoint = state.checkpoint(file_key(cfg, packed.resolve(), "auto"))
+    assert checkpoint["offset"] == len(data) and checkpoint["size"] == packed.stat().st_size
+    # A scan compares the compressed file itself, so a captured one is not queued again.
+    for job in state.due_jobs():
+        state.completed(job)
+    assert discover_paths(cfg, state) == 1  # only the plain file, never captured
+    packed.write_bytes(b"not zstd")
+    with pytest.raises(zstandard.ZstdError):
+        ingest_file(cfg, packed, memory=client, state=state)
+
+
 CODEX_V2_RECORDS = [
     {"timestamp": "2026-10-07T12:00:00Z", "type": "session_meta", "payload": {"id": "native-v2", "cwd": "/w"}},
     {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "# AGENTS.md instructions for /w\n\nDo the thing."}]}},

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import AdapterError, parse_jsonl, tail_settled
+from .sources import read_transcript, transcript_files
 from .client import (
     ClientConfig, ClientError, LocalState, MemoryClient, atomic_write,
     bounded_context, create_gateway, default_config_path, discover_paths, drain_queue,
@@ -172,7 +173,7 @@ def ingest(args: argparse.Namespace) -> int:
         if path.is_dir():
             if not args.recursive:
                 raise ClientError("Directory imports require --recursive.")
-            paths.extend(sorted(path.rglob("*.jsonl")))
+            paths.extend(sorted(transcript_files(path)))
         else:
             paths.append(path)
     if args.session_id and len(paths) != 1:
@@ -201,7 +202,7 @@ def plan_import(args: argparse.Namespace) -> int:
     paths = set()
     for selected in args.paths:
         root = Path(selected).expanduser().resolve()
-        candidates = root.rglob("*.jsonl") if root.is_dir() else [root]
+        candidates = transcript_files(root) if root.is_dir() else [root]
         for path in candidates:
             resolved = path.resolve()
             if root.is_dir() and not resolved.is_relative_to(root):
@@ -212,7 +213,7 @@ def plan_import(args: argparse.Namespace) -> int:
     for path in sorted(paths):
         entry = {"path": str(path), "status": "blocked"}
         try:
-            data = path.read_bytes()
+            data = read_transcript(path)
             entry.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
             transcript = parse_jsonl(data, client=args.client, machine=config.machine_id,
                                      path=str(path), final=args.final, settled=tail_settled(path.stat()))
