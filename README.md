@@ -2,13 +2,13 @@
 
 A private home for your coding agents' shared memory, with one repository for the service, computer setup, and future MCP servers, plugins, and skills.
 
-**Version 0.1.14.** An authenticated Python service with SQLite history, exact retrieval of captured records, project-scoped search, a binary summary tree, a browser memory view with password sign-in, client capture and setup tools, and optional bounded model summaries. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md), which separates what was tested in development from what needs checking on your own computers.
+**Version 0.1.15.** An authenticated Python service with SQLite history, exact retrieval of captured records, project-scoped search, a binary summary tree, a browser memory view with password sign-in, client capture and setup tools, and optional bounded model summaries. See [the implementation specification](docs/SPEC.md), [client compatibility](docs/CLIENTS.md), and [verification evidence](docs/VALIDATION.md), which separates what was tested in development from what needs checking on your own computers.
 
 **Home/work separation:** deploy an independent server per domain, with its own projects and tokens. Servers refuse projects outside their domain, client profiles carry strict project allowlists, and the local backfill planner checks transcripts against them. Read [the deployment and ingestion design](docs/DOMAINS_AND_INGESTION.md) before configuring a computer used for both.
 
 ## What it does
 
-- Keep captured Codex, Claude, T3 and generic records on your server with stable source identity, deduplication, provenance and source timestamps.
+- Keep captured Codex, Claude, Cursor, T3 and generic records on your server with stable source identity, deduplication, provenance and source timestamps.
 - Give each computer its own revocable token scoped to projects such as `atlas`, `harbor` and `personal`. People sign in to the browser view with a password; tokens are for agents.
 - Expose `memory_context`, `memory_search`, `memory_get`, `memory_zoom` and `memory_note` through MCP. Native clients keep control of their own tools and conversations.
 - Start each new chat with a compact, dated context: notes, recent chats (newest first, each with its opening request), and history covering the whole project from the summary tree's roots, oldest first. `sections` picks which parts are included.
@@ -54,7 +54,7 @@ For access from other computers, use HTTPS through a reverse proxy or a private-
 
 1. Clone this repository and install the package into a virtual environment (or run `scripts/bootstrap.sh` / `scripts/bootstrap.ps1`).
 2. Configure the service URL, that computer's token, and explicit project mappings with `agent-hub configure`.
-3. Run `agent-hub setup` to merge the MCP entry and hooks into each installed client, then check with `agent-hub doctor`.
+3. Run `agent-hub setup` to merge the MCP entry and hooks into each installed client, then check with `agent-hub doctor`. Setup also asks once for an optional private skills repository; see [skills](skills/README.md).
 4. Run the capture watcher (`agent-hub watch`) on the host where the agent actually runs, and add it to that system's startup tasks using [the client guide](docs/CLIENTS.md).
 
 [The client guide](docs/CLIENTS.md) has the exact commands, hook behavior, mapping examples, parser versions and client limitations. **T3 setup targets its underlying provider on the T3 host**, and `agent-hub sync-t3` captures T3's saved history read-only, following a thread across providers. A phone or browser that only controls that host needs no watcher.
@@ -127,7 +127,8 @@ Tests use synthetic data only. `requirements.lock` records the tested runtime de
 
 | Version | Highlights |
 | --- | --- |
-| [0.1.14](docs/RELEASE_0.1.14.md) | Delete a rejected note permanently; filter notes by their words; the context preview defaults to the startup size |
+| [0.1.15](docs/RELEASE_0.1.15.md) | Delete a rejected note permanently; filter notes by their words; the context preview defaults to the startup size |
+| [0.1.14](docs/RELEASE_0.1.14.md) | Setup can clone or update a private skills repository named only in `client.json` and run its installer |
 | [0.1.13](docs/RELEASE_0.1.13.md) | First-prompt matches bring each chat's latest answer; setup keeps Codex tool approvals; harness notices don't use up the first prompt |
 | [0.1.12](docs/RELEASE_0.1.12.md) | Record classes, no bookkeeping at ingest, `prune`, recent chats in the startup context, first-prompt history hook |
 | [0.1.11](docs/RELEASE_0.1.11.md) | Jobs for a missing source are set aside after a day; `agent-hub queue` |

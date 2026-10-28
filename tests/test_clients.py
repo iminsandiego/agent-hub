@@ -19,7 +19,7 @@ from agent_hub.bootstrap import _windows_hook_command, setup_clients
 from agent_hub.cli import main
 from agent_hub.client import (
     ClientConfig, ClientError, LocalState, MemoryClient, ServiceError,
-    discover_paths, drain_queue, enqueue_hook, hook_context, ingest_file, prompt_context,
+    discover_paths, drain_queue, enqueue_hook, file_key, hook_context, ingest_file, prompt_context,
     validate_url,
 )
 
@@ -125,6 +125,103 @@ def test_claude_tool_results_and_subagents_have_separate_identity(tmp_path):
     assert child.events[0]["event_id"] != normal.events[0]["event_id"]
 
 
+def cursor_bytes(*records):
+    # Older Cursor versions separate records with newlines but never terminate the last one.
+    return "\n".join(json.dumps(record, ensure_ascii=False) for record in records).encode("utf-8")
+
+
+def settle(path):
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+
+
+CURSOR_USER = {"role": "user", "message": {"content": [{"type": "text", "text": "<timestamp>Monday</timestamp>"}, {"type": "text", "text": "<user_query>\nFind the heater criteria\n</user_query>"}]}}
+CURSOR_REPLY = {"role": "assistant", "message": {"content": [{"type": "text", "text": "Searching."}, {"type": "tool_use", "name": "Grep", "input": {"pattern": "heater"}}]}}
+CURSOR_END = {"type": "turn_ended", "status": "success"}
+
+
+def test_cursor_transcripts_are_detected_and_rendered():
+    parsed = parse_jsonl(jsonl(CURSOR_USER, CURSOR_REPLY, CURSOR_END), machine="m", path="agent-transcripts/chat-1/chat-1.jsonl")
+    assert parsed.client == "cursor"
+    assert parsed.session_id == "chat-1"
+    assert [e["role"] for e in parsed.events] == ["user", "assistant", "system"]
+    assert "Tool call: Grep" in parsed.events[1]["text"] and '"pattern": "heater"' in parsed.events[1]["text"]
+    assert parsed.events[2]["text"] == "Cursor turn ended (success)."
+    assert parsed.pending_bytes == 0 and parsed.unknown_types == []
+
+
+def test_an_unterminated_cursor_record_is_kept_only_once_its_file_settles():
+    data = cursor_bytes(CURSOR_USER, CURSOR_REPLY)
+    live = parse_jsonl(data, machine="m", path="c.jsonl")
+    assert len(live.events) == 1 and live.pending_bytes > 0  # still being written, maybe
+    settled = parse_jsonl(data, machine="m", path="c.jsonl", settled=True)
+    assert len(settled.events) == 2 and settled.pending_bytes == 0
+    # An older chat whose only record is its tail is still recognized once settled.
+    assert parse_jsonl(cursor_bytes(CURSOR_USER), machine="m", path="c.jsonl", settled=True).client == "cursor"
+    with pytest.raises(AdapterError, match="Unrecognized"):
+        parse_jsonl(cursor_bytes(CURSOR_USER), machine="m", path="c.jsonl")
+    half = parse_jsonl(cursor_bytes(CURSOR_USER) + b'\n{"role": "assist', machine="m", path="c.jsonl", settled=True)
+    assert len(half.events) == 1 and half.pending_bytes > 0
+
+
+def test_a_partial_first_record_of_another_client_still_waits(cfg, tmp_path):
+    # An unterminated tail must not decide another client's format: the file would
+    # be checkpointed under a guessed identity and blocked once the record completes.
+    cfg.project = "atlas"
+    for name, record in [("rollout.jsonl", codex_records(tmp_path / "work")[0]),
+                         ("claude.jsonl", {"type": "user", "sessionId": "s", "cwd": str(tmp_path / "work"), "message": {"content": "hi"}})]:
+        source = tmp_path / name
+        source.write_bytes(json.dumps(record).encode())
+        settle(source)
+        with pytest.raises(AdapterError, match="Unrecognized"):
+            ingest_file(cfg, source, memory=connection(cfg, RecordingService()))
+        assert LocalState(cfg).checkpoint(file_key(cfg, source.resolve(), "auto")) is None
+
+
+def test_generic_role_message_exports_are_not_taken_for_cursor():
+    for record in [{"role": "user", "message": {"content": "hi"}},
+                   {"role": "user", "message": {"content": [{"type": "text", "text": "hi"}]}, "session_id": "s1", "cwd": "/work"}]:
+        with pytest.raises(AdapterError, match="Unrecognized"):
+            parse_jsonl(jsonl(record), machine="m", path="export.jsonl")
+
+
+def test_cursor_subagents_have_separate_identity():
+    path = "agent-transcripts/parent/subagents/child.jsonl"
+    child = parse_jsonl(jsonl(CURSOR_USER), machine="m", path=path)
+    assert (child.session_id, child.parent_session_id) == ("parent:subagent:child", "parent")
+    windows = parse_jsonl(jsonl(CURSOR_USER), machine="m", path=r"C:\agent-transcripts\parent\subagents\child.jsonl")
+    assert windows.session_id == "parent:subagent:child"
+    # A deliberate new identity names the parent, as for Claude subagents.
+    renamed = parse_jsonl(jsonl(CURSOR_USER), machine="m", path=path, session_id="reviewed-2")
+    assert (renamed.session_id, renamed.parent_session_id) == ("reviewed-2:subagent:child", "reviewed-2")
+
+
+def test_settled_cursor_tail_is_resent_unchanged_when_the_next_record_arrives(cfg, tmp_path):
+    source = tmp_path / "chat.jsonl"
+    source.write_bytes(cursor_bytes(CURSOR_USER))
+    settle(source)
+    service = RecordingService()
+    client = connection(cfg, service)
+    assert ingest_file(cfg, source, project="atlas", memory=client)["inserted"] == 1
+    source.write_bytes(cursor_bytes(CURSOR_USER, CURSOR_REPLY))
+    settle(source)
+    second = ingest_file(cfg, source, project="atlas", memory=client)
+    assert (second["inserted"], second["duplicates"]) == (1, 1)
+    assert {payload["client"] for payload in service.payloads} == {"cursor"}
+    assert len(service.events) == 2
+
+
+def test_cursor_prompts_are_the_users_own_words():
+    from agent_hub.classify import BOOKKEEPING, classify_event
+    from agent_hub.privacy import temporary_message
+    event = parse_jsonl(jsonl(CURSOR_USER), machine="m", path="c.jsonl").events[0]
+    assert classify_event(event["role"], event["text"], event["raw"]) is None
+    assert classify_event("system", "Cursor turn ended (success).") == BOOKKEEPING
+    marked = {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\n[temp] scratch question\n</user_query>"}]}}
+    assert temporary_message(parse_jsonl(jsonl(marked), machine="m", path="c.jsonl").events)
+    assert not temporary_message([event])
+
+
 def test_project_mapping_boundaries_unicode_and_windows(cfg, tmp_path):
     cfg.mappings += [
         {"path": str(tmp_path / "work" / "日本語"), "project": "unicode"},
@@ -184,6 +281,101 @@ def test_config_and_secret_cannot_be_same_relative_file(cfg, tmp_path, monkeypat
     before = path.read_bytes()
     assert main(["--config", "client.json", "configure", "--token-file", "client.json", "--save-token"]) == 1
     assert path.read_bytes() == before
+
+
+def test_configure_ca_file_is_kept_and_cleared(cfg, tmp_path):
+    ca = tmp_path / "hub-ca.crt"
+    ca.write_text("synthetic\n")
+    path = cfg.save(tmp_path / "client.json")
+    assert main(["--config", str(path), "configure", "--ca-file", str(ca), "--no-prompt"]) == 0
+    assert ClientConfig.load(path).ca_file == str(ca.resolve())
+    assert main(["--config", str(path), "configure", "--url", "https://other.example.com", "--no-prompt"]) == 0
+    assert ClientConfig.load(path).ca_file == str(ca.resolve())
+    assert main(["--config", str(path), "configure", "--ca-file", str(tmp_path / "missing.crt"), "--no-prompt"]) == 1
+    assert main(["--config", str(path), "configure", "--ca-file", "none", "--no-prompt"]) == 0
+    assert ClientConfig.load(path).ca_file is None
+    with pytest.raises(ClientError):
+        ClientConfig(url="https://example.com", machine_id="machine", ca_file="relative.crt")
+
+
+def _private_ca_server(tmp_path):
+    """An HTTPS /health server on localhost whose certificate a fresh private CA signs."""
+    import datetime
+    import ipaddress
+    import ssl
+
+    x509 = pytest.importorskip("cryptography.x509")
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    window = dict(not_valid_before=now - datetime.timedelta(minutes=5), not_valid_after=now + datetime.timedelta(days=1))
+
+    def build(subject, issuer, public_key, signer, *extensions):
+        builder = x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(public_key) \
+            .serial_number(x509.random_serial_number()).not_valid_before(window["not_valid_before"]) \
+            .not_valid_after(window["not_valid_after"])
+        for extension, critical in extensions:
+            builder = builder.add_extension(extension, critical=critical)
+        return builder.sign(signer, hashes.SHA256())
+
+    ca_key, server_key = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Synthetic Hub CA")])
+    ca_cert = build(ca_name, ca_name, ca_key.public_key(), ca_key,
+                    (x509.BasicConstraints(ca=True, path_length=0), True),
+                    (x509.KeyUsage(False, False, False, False, False, True, True, False, False), True))
+    server_cert = build(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]), ca_name,
+                        server_key.public_key(), ca_key,
+                        (x509.SubjectAlternativeName([x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False))
+    pem = serialization.Encoding.PEM
+    ca_path, cert_path, key_path = tmp_path / "hub-ca.crt", tmp_path / "server.crt", tmp_path / "server.key"
+    ca_path.write_bytes(ca_cert.public_bytes(pem))
+    cert_path.write_bytes(server_cert.public_bytes(pem))
+    key_path.write_bytes(server_key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, key_path)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, ca_path
+
+
+def test_ca_file_trusts_a_private_hub_ca(tmp_path, monkeypatch):
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    server, ca_path = _private_ca_server(tmp_path)
+    try:
+        url = f"https://localhost:{server.server_address[1]}"
+        plain = MemoryClient(ClientConfig(url=url, machine_id="machine"))
+        try:
+            with pytest.raises(httpx.ConnectError):
+                plain.http.get("health")
+        finally:
+            plain.close()
+        trusted = MemoryClient(ClientConfig(url=url, machine_id="machine", ca_file=str(ca_path)))
+        try:
+            assert trusted.http.get("health").json() == {"status": "ok"}
+        finally:
+            trusted.close()
+        with pytest.raises(ClientError):
+            MemoryClient(ClientConfig(url=url, machine_id="machine", ca_file=str(tmp_path / "missing.crt")))
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.mark.parametrize("overrides", [{"project": "Other Project"}, {"capture_paths": [""]}, {"mappings": [{"path": "/valid", "project": "../bad"}]}])
@@ -504,6 +696,25 @@ def test_native_http_configs_reference_env_only(cfg, tmp_path):
     codex = tomlkit.parse((c / "config.toml").read_text())
     assert codex["mcp_servers"]["agent-hub"]["bearer_token_env_var"] == cfg.token_env
     assert json.loads(a.read_text())["mcpServers"]["agent-hub"]["headers"]["Authorization"] == "Bearer ${TEST_AGENT_HUB_TOKEN}"
+
+
+def test_cursor_setup_merges_mcp_only_and_is_idempotent(cfg, tmp_path):
+    cursor_home = tmp_path / "cursor"
+    cursor_home.mkdir()
+    mcp = cursor_home / "mcp.json"
+    mcp.write_text(json.dumps({"mcpServers": {"JiraAeetes": {"command": "keep"}}}))
+    config_path = cfg.save(tmp_path / "client.json")
+    first = setup_clients(cfg, config_path, clients=["cursor"], cursor_home=cursor_home, executable=sys.executable)
+    assert first["changed"] and first["backups"]
+    assert any("--capture-path" in note and str(cursor_home / "projects") in note for note in first["notes"])
+    servers = json.loads(mcp.read_text())["mcpServers"]
+    assert servers["JiraAeetes"] == {"command": "keep"}
+    assert servers["agent-hub"]["type"] == "stdio" and "mcp" in servers["agent-hub"]["args"]
+    assert not (cursor_home / "hooks.json").exists()
+    assert setup_clients(cfg, config_path, clients=["cursor"], cursor_home=cursor_home, executable=sys.executable)["changed"] == []
+    assert "synthetic-test-token" not in mcp.read_text()
+    with pytest.raises(ClientError, match="stdio"):
+        setup_clients(cfg, config_path, clients=["cursor"], cursor_home=cursor_home, executable=sys.executable, transport="http")
 
 
 def test_t3_setup_does_not_invent_native_settings(cfg, tmp_path):

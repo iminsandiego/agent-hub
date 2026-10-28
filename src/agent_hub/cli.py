@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .adapters import AdapterError, parse_jsonl
+from .adapters import AdapterError, parse_jsonl, tail_settled
 from .client import (
     ClientConfig, ClientError, LocalState, MemoryClient, atomic_write,
     bounded_context, create_gateway, default_config_path, discover_paths, drain_queue,
@@ -52,6 +52,11 @@ def configure(args: argparse.Namespace) -> int:
     if token_file and Path(token_file).resolve() == target:
         raise ClientError("The token file must be separate from client.json.")
     paths = list(dict.fromkeys((existing.capture_paths if existing else []) + (args.capture_path or [])))
+    ca_file = existing.ca_file if existing else None
+    if args.ca_file:
+        ca_file = None if args.ca_file == "none" else str(Path(args.ca_file).expanduser().resolve())
+        if ca_file and not Path(ca_file).is_file():
+            raise ClientError(f"CA file not found: {ca_file}")
     config = ClientConfig(
         url=args.url or (existing.url if existing else ""),
         machine_id=args.machine_id or (existing.machine_id if existing else "machine-" + uuid.uuid4().hex[:16]),
@@ -65,6 +70,8 @@ def configure(args: argparse.Namespace) -> int:
         strict_scope=args.strict_scope or (existing.strict_scope if existing else False),
         t3_database=args.t3_database or (existing.t3_database if existing else None),
         codex_database=args.codex_database or (existing.codex_database if existing else None),
+        skills_repo=existing.skills_repo if existing else None,
+        ca_file=ca_file,
     )
     # Validate the entire prospective configuration before rotating a credential.
     # An invalid URL or project mapping must leave a working installation intact.
@@ -82,19 +89,33 @@ def configure(args: argparse.Namespace) -> int:
 
 def setup(args: argparse.Namespace) -> int:
     from .bootstrap import setup_clients
+    from .skills import prompt_for_repo, sync_skills, validate_skills_repo
+    config_path = Path(args.config).expanduser() if args.config else default_config_path()
+    config = config_for(args)
     result = setup_clients(
-        config_for(args), args.config or default_config_path(), clients=args.clients,
+        config, config_path, clients=args.clients,
         codex_home=args.codex_home, claude_home=args.claude_home,
-        claude_mcp_file=args.claude_mcp_file, transport=args.transport,
+        claude_mcp_file=args.claude_mcp_file, cursor_home=args.cursor_home, transport=args.transport,
         hooks=not args.no_hooks, dry_run=args.dry_run,
     )
+    # Skills come last, so a missing or unreachable repository never blocks the
+    # MCP and hook setup above. The address is kept only in client.json.
+    repo = config.skills_repo
+    if args.skills_repo is not None:
+        repo = "" if args.skills_repo == "none" else validate_skills_repo(args.skills_repo)
+    elif repo is None and not args.dry_run and sys.stdin.isatty():
+        repo = prompt_for_repo()
+    if repo != config.skills_repo and not args.dry_run:
+        config.skills_repo = repo
+        config.save(config_path)
+    result["skills"] = sync_skills(repo, config_path, dry_run=args.dry_run)
     output(result)
-    return 0
+    return 1 if result["skills"]["status"] == "error" else 0
 
 
 def doctor(args: argparse.Namespace) -> int:
     config = config_for(args)
-    report: dict[str, Any] = {"url": config.url, "machine_id": config.machine_id, "tls_verification": True, "versions": {}}
+    report: dict[str, Any] = {"url": config.url, "machine_id": config.machine_id, "tls_verification": True, "ca_file": config.ca_file, "versions": {}}
     ok = True
     try:
         config.token()
@@ -194,7 +215,7 @@ def plan_import(args: argparse.Namespace) -> int:
             data = path.read_bytes()
             entry.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
             transcript = parse_jsonl(data, client=args.client, machine=config.machine_id,
-                                     path=str(path), final=args.final)
+                                     path=str(path), final=args.final, settled=tail_settled(path.stat()))
             project = config.resolve_project(transcript.cwd)
             config.check_transcript(transcript, project)
             entry.update(project=project, session_id=transcript.session_id,
@@ -346,22 +367,25 @@ def register_commands(subparsers) -> None:
     configure_parser.add_argument("--domain", choices=["home", "work"])
     configure_parser.add_argument("--allow-project", action="append", help="Replace the profile project allowlist; repeat for every allowed project")
     configure_parser.add_argument("--strict-scope", action="store_true", help="Require mapped source cwd evidence throughout each transcript")
+    configure_parser.add_argument("--ca-file", help="PEM CA certificate trusted (alone) for the service URL, for a private-CA HTTPS server; 'none' clears it")
     configure_parser.set_defaults(func=configure)
     setup_parser = subparsers.add_parser("setup", help="Merge MCP configuration and lifecycle hooks into local clients")
-    setup_parser.add_argument("--clients", nargs="+", choices=["codex", "claude", "t3"], default=["codex", "claude"])
+    setup_parser.add_argument("--clients", nargs="+", choices=["codex", "claude", "cursor", "t3"], default=["codex", "claude"])
     setup_parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     setup_parser.add_argument("--codex-home")
     setup_parser.add_argument("--claude-home")
     setup_parser.add_argument("--claude-mcp-file")
+    setup_parser.add_argument("--cursor-home", help="Cursor's settings folder (default ~/.cursor)")
     setup_parser.add_argument("--no-hooks", action="store_true")
     setup_parser.add_argument("--dry-run", action="store_true")
+    setup_parser.add_argument("--skills-repo", metavar="URL_OR_PATH", help="Private skills repository to clone/update and install from (saved in client.json); 'none' to stop asking")
     setup_parser.set_defaults(func=setup)
     check = subparsers.add_parser("doctor", help="Inspect credentials, service reachability, versions, and capture queue")
     check.add_argument("--offline", action="store_true")
     check.set_defaults(func=doctor)
     importer = subparsers.add_parser("ingest", help="Import or queue existing native transcripts")
     importer.add_argument("paths", nargs="*")
-    importer.add_argument("--client", choices=["auto", "codex", "claude", "jsonl", "codex-app-server"], default="auto")
+    importer.add_argument("--client", choices=["auto", "codex", "claude", "cursor", "jsonl", "codex-app-server"], default="auto")
     importer.add_argument("--recursive", action="store_true")
     importer.add_argument("--project")
     importer.add_argument("--session-id")
@@ -372,7 +396,7 @@ def register_commands(subparsers) -> None:
     importer.set_defaults(func=ingest)
     planner = subparsers.add_parser("plan-import", help="Inventory selected JSONL sources locally without queueing or uploading")
     planner.add_argument("paths", nargs="+")
-    planner.add_argument("--client", choices=["auto", "codex", "claude", "jsonl"], default="auto")
+    planner.add_argument("--client", choices=["auto", "codex", "claude", "cursor", "jsonl"], default="auto")
     planner.add_argument("--final", action="store_true")
     planner.add_argument("--output", help="Write a new private inventory file; existing files are preserved")
     planner.set_defaults(func=plan_import)

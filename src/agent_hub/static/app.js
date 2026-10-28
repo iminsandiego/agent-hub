@@ -12,10 +12,13 @@ const state = {
   revision: 0, sessions: new Map(), conversationOnly: false,
 };
 const VIEW_NAMES = { home: "Home", search: "Search", sessions: "Sessions", notes: "Notes", context: "Agent context", timeline: "Timeline", integrations: "Connect agents" };
-const CLIENTS = { codex: ["Codex", "Cx"], claude: ["Claude Code", "Cl"], t3: ["T3", "T3"], chatgpt: ["ChatGPT", "GP"], generic: ["Generic", "Gn"] };
+const CLIENTS = { codex: ["Codex", "Cx"], claude: ["Claude Code", "Cl"], cursor: ["Cursor", "Cu"], t3: ["T3", "T3"], chatgpt: ["ChatGPT", "GP"], generic: ["Generic", "Gn"] };
 const ROLES = { user: "user", assistant: "assistant", tool: "tool", system: "system" };
 const KINDS = ["decision", "instruction", "observation", "procedure", "failure", "question", "preference"];
 const INJECTED = /^\s*(<[a-z_-]+>|# AGENTS\.md|Caveat:)/i;
+// Cursor wraps the user's own prompt in <user_query>, so it is not client context.
+const USER_QUERY = /<user_query>/i;
+const injectedText = (text) => INJECTED.test(text) && !USER_QUERY.test(text);
 const STATUS_LABEL = { candidate: "Awaiting review", active: "Active", rejected: "Rejected", superseded: "Superseded" };
 
 // ---------------------------------------------------------------- DOM helpers
@@ -790,12 +793,14 @@ async function sessionDetail(root, id) {
   root.append(more);
 }
 function firstUserText(events) {
-  const first = events.find((item) => item.role === "user" && item.text.trim() && !INJECTED.test(item.text));
-  return first ? first.text.replace(/\s+/g, " ").slice(0, 160) : "";
+  const first = events.find((item) => item.role === "user" && item.text.trim() && !injectedText(item.text));
+  if (!first) return "";
+  const query = first.text.match(/<user_query>([\s\S]*?)(<\/user_query>|$)/i);
+  return (query ? query[1] : first.text).replace(/\s+/g, " ").trim().slice(0, 160);
 }
 function message(record) {
   const cls = roleClass(record.role);
-  const injected = cls === "user" && INJECTED.test(record.text || "");
+  const injected = cls === "user" && injectedText(record.text || "");
   const auxiliary = cls === "tool" || cls === "system" || injected;
   const body = el("div", "msg-body", record.text || "(empty)");
   const long = auxiliary && (record.text.length > 360 || record.text.split("\n").length > 6);

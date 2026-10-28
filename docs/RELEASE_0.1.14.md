@@ -1,11 +1,9 @@
 # Agent Hub 0.1.14
 
-Notes can be deleted and filtered in the browser. No archived record, identity or normalized text changes, and the schema is unchanged.
+Optional private skills repository for `agent-hub setup`. No server, archive, identity or normalized text changes; the server needs no restart.
 
-**Delete a note permanently.** A rejected note now has a **Delete…** action for administrators; an active note is retired first. After a confirmation, the note's statement, search entry, source links, idempotency keys and review history are erased, including the review of a note it replaced. That note keeps its status and loses the link. The chats the note came from stay in memory: forgetting a chat is still the way to remove its records. Nothing remembers a deleted statement, so an agent could propose it again; a rejected note, by contrast, absorbs a repeat proposal. The REST call is `DELETE /v1/projects/{project}/memories/{id}`, administrator only. Agents have no tool for it.
+**Setup can install your skills.** The first interactive `agent-hub setup` asks for a skills repository (SSH or HTTPS git URL, or an absolute local path) and saves the answer as `skills_repo` in `client.json`; a blank answer is saved as declined and is not asked again. `--skills-repo URL_OR_PATH` sets it and `--skills-repo none` declines. For a URL, setup clones it beside `client.json` (`skills-repo/`) or fast-forwards an existing clone, then runs the repository's root `install.sh` (`--dry-run` during a dry run). Git never prompts for credentials. Option-like, `ext::` and `file://` sources are rejected.
 
-**Filter notes.** The Notes page has a filter box for each status. It runs on the server, so it also finds notes beyond the newest 200, and it keeps notes whose statement contains every word typed (ASCII letters case-insensitive). Search leaves out rejected and superseded notes, so the filter is how to find one to delete. The filter stays in the address, so it follows the status tabs and survives a reload. `GET /v1/projects/{project}/memories` takes the same filter as `query`.
+**Skills never block client setup.** The skills step runs after the MCP and hook setup. A missing, unreachable or failing repository is reported under `skills` in the setup output and makes setup exit 1. Noninteractive runs and dry runs never prompt. Installers are not run on Windows.
 
-**Context preview at the startup size.** The Agent context page said the startup hook requests 8,000 characters; since 0.1.12 it requests 9,500. The page now says so, and its size menu offers and defaults to 9,500.
-
-Upgrade: install and restart the server. Clients are unchanged.
+`agent-hub configure` keeps an existing `skills_repo`. See `skills/README.md` for what a repository's `install.sh` should do.

@@ -11,10 +11,13 @@ from pathlib import Path
 
 
 _MARKER = re.compile(r"^\s*\[(?:temp|temporary)\](?:\s|$)", re.I)
+# Cursor records the prompt inside <user_query>, after any context blocks.
+_CURSOR_MARKER = re.compile(r"<user_query>\s*\[(?:temp|temporary)\](?:\s|$)", re.I)
 
 
 def temporary_message(events: list[dict]) -> bool:
-    return any((e.get("role") == "user" and isinstance(e.get("text"), str) and _MARKER.match(e["text"]))
+    return any((e.get("role") == "user" and isinstance(e.get("text"), str)
+                and (_MARKER.match(e["text"]) or _CURSOR_MARKER.search(e["text"])))
                or _queued_prompt_marked(e.get("raw"))
                for e in events)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .adapters import parse_jsonl
+from .adapters import parse_jsonl, tail_settled
 from .privacy import temporary_message
 
 
@@ -47,7 +47,7 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
         part = parse_jsonl(data, client=client if base_transcript is None else base_transcript.client,
                            machine=config.machine_id, path=str(source), session_id=identity,
                            cwd=cwd if base_transcript is None else base_transcript.cwd,
-                           final=final, start_line=ordinal, adapter_version=adapter_version)
+                           final=final, start_line=ordinal, adapter_version=adapter_version, settled=tail_settled(stat))
         if base_transcript is None:
             base_transcript = part
             target = config.resolve_project(part.cwd, project)
@@ -80,7 +80,7 @@ def ingest_large_file(config, source, *, client="auto", project=None, cwd=None,
         for base, ordinal, data in chunks(source, stat.st_size):
             part = parse_jsonl(data, client=base_transcript.client, machine=config.machine_id,
                                path=str(source), session_id=identity, cwd=base_transcript.cwd,
-                               final=final, start_line=ordinal, adapter_version=adapter_version)
+                               final=final, start_line=ordinal, adapter_version=adapter_version, settled=tail_settled(stat))
             hashed = 0
             for e in part.events:
                 e["_end_offset"] += base

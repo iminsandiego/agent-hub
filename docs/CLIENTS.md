@@ -37,6 +37,8 @@ python3 -m venv .venv
 .venv/bin/agent-hub watch
 ```
 
+`setup` also asks once, in an interactive terminal, for an optional private skills repository (an SSH or HTTPS git URL, or an absolute path to an existing checkout). The answer is saved as `skills_repo` in `client.json` only; a blank answer is saved as declined and setup stops asking. Use `--skills-repo URL_OR_PATH` to set or change it without a prompt, or `--skills-repo none` to decline. See [skills](../skills/README.md) for what setup does with it.
+
 `configure` asks for the token using hidden terminal input when a token file or environment variable is unavailable. It saves the credential separately from `client.json`. If you transferred a token file, add `--token-file /absolute/private/machine.token`. Never put a token value in a shell argument. Select only the clients you use, for example `setup --clients codex`.
 
 The helper performs installation, configuration, setup for Codex and Claude, and connection checks:
@@ -113,6 +115,8 @@ Re-running `configure` preserves the machine ID and existing mappings/capture pa
 
 The environment variable named by `token_env` (default `AGENT_HUB_TOKEN`) takes precedence over `token_file`. `--save-token` stores the environment value or hidden prompt input in the separate token file. Client files are created with private POSIX modes; Windows protection depends on the containing directory's ACL. Keep state, credentials, native transcripts, and backups outside the source repository. Give each installation a distinct machine ID and server token; revoke a lost computer's token on the server.
 
+For a server whose HTTPS certificate comes from a private CA, `agent-hub configure --ca-file /absolute/path/hub-ca.crt` saves `ca_file`. The client (hooks, `watch`, `ingest`, `doctor` and the stdio MCP gateway) then trusts that CA alone for the service URL; other TLS in the process, and the system's certificate stores, are unchanged, so there is no need to set `SSL_CERT_FILE`. `--ca-file none` clears it. A native HTTP MCP client needs the CA in its own mechanism: Claude Code reads `NODE_EXTRA_CA_CERTS`.
+
 ## What setup changes
 
 `setup --dry-run` reports planned paths without writing. Normal setup parses and validates every selected configuration before making changes, preserves unrelated MCP entries and hook groups, and writes a private timestamped backup of each existing file it changes. Repeated setup with the same inputs makes no duplicate handlers. A manually changed or unrelated entry already named `agent-hub` produces a visible conflict.
@@ -121,6 +125,7 @@ The environment variable named by `token_env` (default `AGENT_HUB_TOKEN`) takes 
 | --- | --- | --- | --- |
 | Codex | `CODEX_HOME/config.toml`, default `~/.codex/config.toml` | `CODEX_HOME/hooks.json` | `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` |
 | Claude Code | User MCP file, normally `~/.claude.json` | `CLAUDE_CONFIG_DIR/settings.json`, default `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`, `SubagentStop` |
+| Cursor | `~/.cursor/mcp.json` (`--cursor-home` for another folder); stdio only | None | No hooks; add `~/.cursor/projects` as a capture path so the watcher uploads agent transcripts. Upgrade the server first: a server without Cursor support rejects `cursor` sessions with HTTP 422 |
 | T3 Code | Underlying Codex or Claude provider on its execution host | Underlying provider, where supported | No invented T3-specific memory hook |
 
 Codex [documents shared CLI/IDE MCP configuration](https://developers.openai.com/codex/mcp). Claude [documents MCP scopes separately from hook settings](https://code.claude.com/docs/en/mcp). For a custom Claude profile, supply both `--claude-home` and `--claude-mcp-file` with the verified paths for that profile; Agent Hub does not guess where another account's global application state lives.
@@ -268,6 +273,7 @@ On Windows, create a Task Scheduler task for your own account, triggered at logo
 | Codex native JSONL | Read complete records, derive source session/cwd, retain unknown record types | Version-dependent local format; separately stored artifacts are not fetched |
 | Codex app-server v2 | Read persisted thread metadata and full paginated turns; postpone active turns | Returned API item JSON, not byte recovery of an original transcript file |
 | Claude native JSONL | Read parent and child transcripts, preserve complete record strings | External images, attachments, and spilled tool-output files are not copied |
+| Cursor agent transcripts | Auto-detected by record shape: exactly `role` and `message` with a `content` list (the path is not checked). Subagents under `<chat>/subagents/` get `<chat>:subagent:<id>` identity | Records carry no cwd, timestamps or tool results; needs a default project or `--project`. IDE chat history in `state.vscdb` and `cursor-agent` CLI `store.db` chats are not read |
 | Generic JSONL | Explicit `--client jsonl`, one JSON record per event | Requires a deliberate project assignment or source cwd mapping |
 | T3 diagnostic logs | No importer | Truncated provider diagnostics are insufficient for a faithful conversation archive |
 
@@ -286,7 +292,7 @@ The [Claude session documentation](https://code.claude.com/docs/en/agent-sdk/ses
 
 The watcher resolves transcript `cwd` through your mappings. Configured roots authorize discovery, while mappings decide whether a discovered session can upload. A symlink outside a configured directory root is skipped. Missing files, unsupported auto-detection, malformed complete lines, mapping failures, and upload rejections remain visible in the queue.
 
-Each accepted complete JSONL record retains its exact decoded UTF-8 JSON text, including internal spacing, Unicode, and unknown fields. Line delimiters are not part of event `raw`. Blank separator lines affect record ordinals but do not create events. An unterminated final line is deferred while watching; use `ingest --final` only for a finished export. Malformed complete records produce a visible error and are never silently discarded. This is exact record recovery, not byte-for-byte reconstruction of the entire original file or external attachments.
+Each accepted complete JSONL record retains its exact decoded UTF-8 JSON text, including internal spacing, Unicode, and unknown fields. Line delimiters are not part of event `raw`. Blank separator lines affect record ordinals but do not create events. An unterminated final line is deferred while watching; use `ingest --final` only for a finished export. Recent Cursor transcripts terminate every record, so live chats follow this rule. Older ones (seen in files last written February to May 2026) never terminated a chat's last record; a valid unterminated Cursor record is accepted once its file has been unchanged for 10 minutes (`CURSOR_TAIL_SETTLE_SECONDS`). If that chat later grows, the record is resent unchanged and counts as a duplicate; a record rewritten in place blocks capture of that file. Cursor identity is the chat ID in the file name. The same chat ID in two workspace folders with different content is refused with a conflict; import the second copy deliberately with `ingest --client cursor --session-id <new-id>` after review. Malformed complete records produce a visible error and are never silently discarded. This is exact record recovery, not byte-for-byte reconstruction of the entire original file or external attachments.
 
 ### Parser versions (0.1.9)
 
@@ -390,7 +396,8 @@ T3 and native provider capture are separate attributed sources; the same visible
 answer may appear in both. They are not falsely merged or counted as independent
 facts. T3 capture covers saved Claude/Grok/Cursor events even without a native
 parser for those providers. It does not install a provider or prove its inference
-works. Standalone Grok and Cursor archive import are not implemented here.
+works. Standalone Grok import is not implemented here. Native Cursor agent
+transcripts are imported directly (see Source adapters and backfill).
 
 `scripts/watch-local.py` supplies a changed-file watcher for Codex/Claude JSONL
 roots plus the durable native hook queue. Its first pass baselines old files;

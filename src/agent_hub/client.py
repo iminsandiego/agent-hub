@@ -19,7 +19,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
-from .adapters import ADAPTER_VERSION, AdapterError, SourceUnavailable, Transcript, export_codex_thread, parse_jsonl
+from .adapters import ADAPTER_VERSION, AdapterError, SourceUnavailable, Transcript, export_codex_thread, parse_jsonl, tail_settled
 
 
 class ClientError(ValueError):
@@ -176,8 +176,14 @@ class ClientConfig:
     strict_scope: bool = False
     t3_database: str | None = None
     codex_database: str | None = None
+    skills_repo: str | None = None
+    ca_file: str | None = None
 
     def __post_init__(self) -> None:
+        from .skills import validate_skills_repo
+        self.skills_repo = validate_skills_repo(self.skills_repo)
+        if self.ca_file is not None and (not isinstance(self.ca_file, str) or not self.ca_file or not Path(self.ca_file).expanduser().is_absolute()):
+            raise ClientError("ca_file must be an absolute PEM certificate path or null")
         if self.t3_database is not None and (not isinstance(self.t3_database, str) or not self.t3_database or not Path(self.t3_database).expanduser().is_absolute()):
             raise ClientError("t3_database must be an absolute SQLite path or null")
         if self.codex_database is not None and (not isinstance(self.codex_database, str) or not self.codex_database or not Path(self.codex_database).expanduser().is_absolute()):
@@ -313,6 +319,13 @@ class MemoryClient:
         # Loopback traffic must not go through a corporate/external proxy.
         # Explicit CA settings still apply to HTTPS loopback endpoints.
         verify = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE"), capath=os.environ.get("SSL_CERT_DIR")) if loopback else True
+        if config.ca_file:
+            # A private hub CA is trusted alone, for this connection only; the
+            # process's other TLS (and SSL_CERT_FILE) is left untouched.
+            try:
+                verify = ssl.create_default_context(cafile=str(Path(config.ca_file).expanduser()))
+            except (OSError, ssl.SSLError) as exc:
+                raise ClientError(f"Cannot load ca_file {config.ca_file}: {exc}") from exc
         self.http = httpx.Client(
             base_url=config.url + "/", timeout=timeout, verify=verify,
             follow_redirects=False, transport=transport, trust_env=not loopback,
@@ -609,7 +622,7 @@ def _ingest_file_version(
     data = source.read_bytes()
     stat = source.stat()
     transcript = parse_jsonl(data, client=client, machine=config.machine_id, path=str(source), session_id=session_id,
-                             cwd=cwd, final=final, adapter_version=adapter_version)
+                             cwd=cwd, final=final, adapter_version=adapter_version, settled=tail_settled(stat))
     target = config.resolve_project(transcript.cwd, project)
     config.check_transcript(transcript, target, cwd)
     identifier = file_key(config, source, client, session_id)
