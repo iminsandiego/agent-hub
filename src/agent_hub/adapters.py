@@ -256,6 +256,29 @@ def _normalize(item: Any, client: str, adapter_version: int = 1) -> tuple[str, s
     return role, content_text(item), True
 
 
+# The head of a Codex rollout line: its timestamp, ordinal and record type.
+_CODEX_HEAD = re.compile(rb'^\{"timestamp":"[^"]*","ordinal":(\d+),"type":"([a-z_]+)"')
+
+
+def _rewritten(raw: bytes, following: bytes | None) -> bool:
+    """Whether a malformed line is a Codex record cut off mid-write that the
+    next line writes again in full (same ordinal and type).
+
+    Codex has been seen to leave a compaction record cut off at 2 MiB and then
+    write the whole record on the next line. The cut-off copy holds nothing the
+    full one does not, so it is skipped like a blank line; any other malformed
+    line still fails the import.
+    """
+    head = _CODEX_HEAD.match(raw)
+    if not head or following is None:
+        return False
+    try:
+        item = json.loads(following)
+    except ValueError:
+        return False
+    return isinstance(item, dict) and item.get("ordinal") == int(head[1]) and item.get("type") == head[2].decode()
+
+
 def parse_jsonl(
     data: bytes,
     *,
@@ -274,7 +297,8 @@ def parse_jsonl(
     Watching defers an unterminated final record, even if currently valid JSON,
     since the writer may still append to it. An explicit final import accepts a
     valid final record without a newline. Invalid complete lines fail visibly.
-    Blank separator lines count toward source ordinals, but are not events.
+    Blank separator lines count toward source ordinals, but are not events; so
+    does a cut-off Codex record that the next line writes in full (``_rewritten``).
     ``settled`` (the source has not changed for CURSOR_TAIL_SETTLE_SECONDS) also
     accepts a valid unterminated Cursor record, which older Cursor versions leave.
     """
@@ -284,7 +308,9 @@ def parse_jsonl(
     pending = 0
     tail: tuple[int, bytes] | None = None
     errors: list[str] = []
-    for ordinal, line in enumerate(data.splitlines(keepends=True), start=start_line + 1):
+    lines = data.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        ordinal = start_line + 1 + index
         terminated = line.endswith(b"\n")
         if not terminated and not final:
             pending = len(line)
@@ -308,6 +334,15 @@ def parse_jsonl(
             if not terminated:
                 pending = len(line)
                 break
+            following = lines[index + 1] if index + 1 < len(lines) else None
+            if following is not None and not following.endswith(b"\n") and not final and _CODEX_HEAD.match(raw):
+                # The full copy may still be being written: wait for it.
+                pending = len(line) + len(following)
+                break
+            if _rewritten(raw, following):
+                offset += len(line)
+                complete_lines = ordinal - start_line
+                continue
             errors.append(f"line {ordinal}: {type(exc).__name__}")
             offset += len(line)
             complete_lines = ordinal - start_line
