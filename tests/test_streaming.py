@@ -71,6 +71,48 @@ def test_late_temporary_marker_and_malformed_tail_never_partially_upload(fixture
     assert store.stats('home')['events']==0
 
 
+def _rollout(tmp_path,cut_ordinal=3,rewrite_ordinal=3):
+    def row(n,kind,payload):
+        return json.dumps({'timestamp':'2026-01-01T00:00:%02dZ'%n,'ordinal':n,'type':kind,'payload':payload},separators=(',',':'))
+    rows=[row(0,'session_meta',{'id':'rollout','cwd':str(tmp_path)})]
+    rows+=[row(n,'event_msg',{'type':'user_message','message':'sample '+str(n)+' '+'x'*200}) for n in (1,2)]
+    full=row(cut_ordinal,'compacted',{'message':'summary','replacement_history':[{'type':'message','text':'y'*400}]})
+    rows+=[full[:300],row(rewrite_ordinal,'compacted',{'message':'summary','replacement_history':[{'type':'message','text':'y'*400}]})]
+    rows+=[row(n,'event_msg',{'type':'user_message','message':'sample '+str(n)}) for n in (4,5)]
+    return ('\n'.join(rows)+'\n').encode()
+
+
+def test_cut_off_codex_record_rewritten_in_full_is_skipped(tmp_path):
+    data=_rollout(tmp_path)
+    parsed=parse_jsonl(data,machine='machine',path='rollout.jsonl')
+    # Line 4 is the cut-off copy: no event, and later lines keep their ordinals.
+    assert [e['_line'] for e in parsed.events]==[1,2,3,5,6,7]
+    assert parsed.complete_bytes==len(data) and parsed.pending_bytes==0
+    # While the full copy is still being written, the cut-off line waits.
+    partial=data[:data.index(b'\n',data.index(b'"ordinal":3,"type":"compacted","payload":{"message":"summary","replacement_history":[{"type":"message","text":"'+b'y'*400))]
+    waiting=parse_jsonl(partial,machine='machine',path='rollout.jsonl')
+    assert [e['_line'] for e in waiting.events]==[1,2,3] and waiting.complete_bytes+waiting.pending_bytes==len(partial)
+    # Any other malformed line still fails, including a cut-off record the next line does not rewrite.
+    with pytest.raises(ValueError,match='Malformed'):
+        parse_jsonl(_rollout(tmp_path,rewrite_ordinal=9),machine='machine',path='rollout.jsonl')
+
+
+def test_cut_off_codex_record_at_a_chunk_boundary_streams_like_in_memory(fixture,tmp_path,monkeypatch):
+    import agent_hub.streaming as module
+    _,_,cfg,store,memory=fixture
+    data=_rollout(tmp_path)
+    expected=parse_jsonl(data,machine='machine',path='rollout.jsonl')
+    # The chunk budget is reached on the cut-off line itself.
+    budget=len(b''.join(data.splitlines(keepends=True)[:4]))
+    monkeypatch.setattr(module,'chunks',lambda p,s,original=chunks:original(p,s,budget=budget))
+    path=tmp_path/'rollout.jsonl';path.write_bytes(data)
+    result=ingest_large_file(cfg,path,memory=memory)
+    assert result['inserted']==result['source_records']==len(expected.events)==6
+    sid=store.list_sessions('home')[0]['id']
+    assert [e['raw'] for e in store.get_session('home',sid)['events']]==[e['raw'] for e in expected.events]
+    assert LocalState(cfg).checkpoint(file_key(cfg,path,'auto'))['offset']==len(data)
+
+
 def test_streaming_outage_restart_and_rewrite_protection(fixture):
     path,data,cfg,store,memory=fixture
     original=memory.ingest;count=0

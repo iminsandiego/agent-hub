@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 from .adapters import parse_jsonl, tail_settled
 from .privacy import temporary_message
 from .sources import compressed, open_transcript
+
+
+def _whole(line: bytes) -> bool:
+    try:
+        json.loads(line)
+    except ValueError:
+        return False
+    return True
 
 
 def chunks(source: Path, size: int | None, budget: int = 512_000):
@@ -15,7 +24,7 @@ def chunks(source: Path, size: int | None, budget: int = 512_000):
     base = ordinal = 0
     with open_transcript(source) as stream:
         while base < size:
-            lines = []; length = 0
+            lines = []; length = 0; held = False
             while base + length < size:
                 line = stream.readline(min(size - base - length, 67_108_865))
                 if not line:
@@ -23,8 +32,12 @@ def chunks(source: Path, size: int | None, budget: int = 512_000):
                 if len(line) > 67_108_864:
                     raise ValueError("A source record exceeds 64 MiB; source retained for explicit review")
                 lines.append(line); length += len(line)
-                if length >= budget:
+                # A chunk does not end on a malformed line: one more line is read,
+                # so a cut-off Codex record is parsed with the line that writes it
+                # in full.
+                if length >= budget and (held or _whole(line)):
                     break
+                held = length >= budget
             if not lines:
                 break
             yield base, ordinal, b"".join(lines)
