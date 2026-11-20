@@ -259,11 +259,15 @@ def watch(args: argparse.Namespace) -> int:
     config = config_for(args)
     if not 1 <= args.poll_seconds <= 60:
         raise ClientError("--poll-seconds must be between 1 and 60.")
+    if not 1 <= args.timeout <= 600:
+        raise ClientError("--timeout must be between 1 and 600 seconds.")
     state = LocalState(config)
+    # Large transcripts can take longer than the default 15 s request timeout.
+    memory = MemoryClient(config, timeout=args.timeout)
     try:
         while True:
             discovered = 0 if args.no_scan else discover_paths(config, state)
-            result = drain_queue(config, state=state)
+            result = drain_queue(config, state=state, memory=memory)
             if args.once or discovered or result["completed"] or result["failed"]:
                 output({"discovered": discovered, **result})
                 sys.stdout.flush()
@@ -272,6 +276,8 @@ def watch(args: argparse.Namespace) -> int:
             time.sleep(args.poll_seconds)
     except KeyboardInterrupt:
         return 0
+    finally:
+        memory.close()
 
 
 def queue_command(args: argparse.Namespace) -> int:
@@ -411,6 +417,7 @@ def register_commands(subparsers) -> None:
     watcher.add_argument("--once", action="store_true")
     watcher.add_argument("--no-scan", action="store_true")
     watcher.add_argument("--poll-seconds", type=float, default=5)
+    watcher.add_argument("--timeout", type=float, default=15, help="Upload request timeout in seconds (1-600); raise it for large transcripts")
     watcher.set_defaults(func=watch)
     queue_parser = subparsers.add_parser("queue", help="List capture jobs set aside because their source is gone, or requeue them")
     queue_parser.add_argument("action", choices=["list", "requeue"])

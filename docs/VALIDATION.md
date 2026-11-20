@@ -1,3 +1,9 @@
+## Watcher upload timeout (unreleased), November 19, 2026
+
+Windows 11, CPython 3.12.10: `python -m pytest -q` ran 446 tests, 422 passed and 24 skipped (the POSIX-only skills tests). New in `tests/test_clients.py`: `watch --timeout` refuses 0 and 601, passes 180 to the one upload client that every queue drain reuses, and closes that client when the watcher stops; without the change the test fails because `watch` does not accept `--timeout`. The owner's Windows work computer has run its logon watcher task with `watch --timeout 180` from an uncommitted copy of this change; its `watch.log` shows no timeout errors. Not run: macOS or Linux watchers.
+
+---
+
 ## Cut-off Codex records (unreleased), October 28, 2026
 
 Windows 11, CPython 3.12.10: `python -m pytest -q` ran 445 tests, 421 passed and 24 skipped (the POSIX-only skills tests). New in `tests/test_streaming.py`: a synthetic rollout whose compaction record is cut off and then written in full on the next line parses with that line skipped and the later lines' ordinals unchanged; while the full copy is still unterminated, the cut-off line waits; a cut-off record that the next line does not rewrite (a different ordinal) still fails as malformed. Through the streaming path, with the chunk budget reached on the cut-off line, the archived records and checkpoint match the in-memory parse. Each half is needed: without the parser change both tests fail, and without the streaming change (a chunk may end on the cut-off line) the streaming test fails.

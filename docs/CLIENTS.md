@@ -209,7 +209,7 @@ Current [Claude hook documentation](https://code.claude.com/docs/en/hooks) suppo
 
 ### Keep the watcher running
 
-Run `agent-hub watch` as the same user that runs the coding provider, with access to its configuration and source files. Run one watcher per installation. `watch --once` performs one discovery/drain pass; `watch --no-scan` processes hook/manual jobs without scanning configured directories. `--poll-seconds` accepts 1–60 seconds and defaults to 5.
+Run `agent-hub watch` as the same user that runs the coding provider, with access to its configuration and source files. Run one watcher per installation. `watch --once` performs one discovery/drain pass; `watch --no-scan` processes hook/manual jobs without scanning configured directories. `--poll-seconds` accepts 1–60 seconds and defaults to 5. `--timeout` sets each upload request's timeout, 1–600 seconds, default 15; raise it, for example `--timeout 180`, when large transcripts fail with a read timeout.
 
 On a systemd Linux desktop/server, save this as `~/.config/systemd/user/agent-hub-watch.service`, replacing paths with your real absolute paths:
 
