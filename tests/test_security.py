@@ -283,7 +283,7 @@ def test_mcp_initialization_labels_history_and_does_not_offer_approval_tool(secu
         listed = client.post("/mcp", headers=headers, json=rpc("tools/list", request_id=2))
     assert listed.status_code == 200
     names = {item["name"] for item in listed.json()["result"]["tools"]}
-    assert names == {"memory_context", "memory_search", "memory_get", "memory_zoom", "memory_note"}
+    assert names == {"memory_context", "memory_search", "memory_get", "memory_zoom", "memory_note", "memory_projects"}
 
 
 @pytest.mark.parametrize("tool,arguments", [
@@ -299,7 +299,8 @@ def test_mcp_tools_apply_the_same_project_scope(secured_app, tool, arguments):
         response = client.post("/mcp", headers=mcp_headers(tokens),
                                json=rpc("tools/call", {"name": tool, "arguments": arguments}))
     assert_tool_denied(response)
-    assert "Access denied" in response.text
+    # The error lists only what this token can read; it never confirms harbor exists.
+    assert "Unknown project 'harbor'. Valid projects: atlas. Retry with one of these." in response.text
 
 
 def test_mcp_read_token_cannot_propose_memory(secured_app):
@@ -309,6 +310,7 @@ def test_mcp_read_token_cannot_propose_memory(secured_app):
             "name": "memory_note", "arguments": {"project": "atlas", "statement": "No write permission"},
         }))
     assert_tool_denied(response)
+    assert "can read project 'atlas' but lacks write permission" in response.text
 
 
 @pytest.mark.parametrize("tool,arguments", [
