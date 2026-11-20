@@ -10,7 +10,7 @@ A private home for your coding agents' shared memory, with one repository for th
 
 - Keep captured Codex, Claude, Cursor, T3 and generic records on your server with stable source identity, deduplication, provenance and source timestamps.
 - Give each computer its own revocable token scoped to projects such as `atlas`, `harbor` and `personal`. People sign in to the browser view with a password; tokens are for agents.
-- Expose `memory_context`, `memory_search`, `memory_get`, `memory_zoom` and `memory_note` through MCP. Native clients keep control of their own tools and conversations.
+- Expose `memory_context`, `memory_search`, `memory_get`, `memory_zoom` and `memory_note` through MCP, plus `memory_projects`. The MCP instructions name the valid projects, and `project` may be left out when there is a default project. Native clients keep control of their own tools and conversations.
 - Start each new chat with a compact, dated context: notes, recent chats (newest first, each with its opening request), and history covering the whole project from the summary tree's roots, oldest first. `sections` picks which parts are included.
 - Add matching history to a session's first prompt through a hook: the matching records, at most two per chat and each naming its chat, plus the start of that chat's latest answer. Later prompts and harness notices add nothing, and an outage adds nothing rather than delaying the prompt.
 - Search conversation text with SQLite FTS5 (with a labelled substring fallback), ranking conversation ahead of injected text, tool output and derived threads. Hits and context lines carry `lo+n` references that `memory_zoom` opens, down to the exact captured source.

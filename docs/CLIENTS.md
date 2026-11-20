@@ -145,7 +145,7 @@ The native client launches your installed Python executable with an argument arr
 -m agent_hub.cli --config /absolute/path/client.json mcp
 ```
 
-The gateway uses the official MCP Python SDK and forwards the five memory tools to the authenticated service. It reads the token locally, which also works when a desktop app does not inherit terminal environment variables. Protocol output is reserved for MCP messages.
+The gateway uses the official MCP Python SDK and forwards the six memory tools to the authenticated service. Its default project, used when a call leaves `project` out, is the one mapped to its working directory, else `project` in `client.json`; its instructions name the projects configured on this computer. It reads the token locally, which also works when a desktop app does not inherit terminal environment variables. Protocol output is reserved for MCP messages.
 
 ### Optional: native HTTP connection
 

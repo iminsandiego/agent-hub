@@ -108,6 +108,19 @@ Update these fields in the private `server.json` before restarting:
 
 Preserve the other existing fields, particularly `data_dir`. This is a partial example to merge, not a replacement for the full settings file. Native clients usually send no `Origin`; when a browser does, it must match the explicit allowlist or be the same origin as the allowed `Host` it was sent to. The HTTP `Host` must always match. Do not set wildcard origins or disable TLS verification.
 
+### Default project for MCP calls
+
+The server's MCP instructions name the valid projects, so agents do not have to guess one. An MCP call may leave `project` out. It then uses `default_project` from `server.json`, or, when that is not set and the server has exactly one project, that project:
+
+```json
+{
+  "domain": "work",
+  "default_project": "work-werfen"
+}
+```
+
+`default_project` must be inside the server's `domain`; the server refuses to start otherwise. A wrong project name gets an error that lists the projects the caller's token can read, for example `Unknown project 'agent-hub'. Valid projects: work-werfen. Retry with one of these.` It never lists another domain's projects or projects the token cannot read. The `memory_projects` tool returns the same list. REST routes still take the project in the path. Restart the service after you add a project with the CLI, so that the instructions list it; a project created through `POST /v1/projects` is listed at once.
+
 Proxy HTTPS traffic to `127.0.0.1:8765`. The service still needs bearer authentication. A VPN/private-network route protects reachability; it does not replace per-computer authorization. If you use a private CA, install its trust through your operating system or client's supported CA mechanism. For Agent Hub's own client (hooks, `watch`, `ingest` and the stdio MCP gateway), `agent-hub configure --ca-file /path/to/hub-ca.crt` saves `ca_file` in `client.json`; the client then trusts that CA alone for the service URL, without changing the process's other TLS or setting `SSL_CERT_FILE`. Native HTTP MCP clients need the CA in their own mechanism (for Claude Code, `NODE_EXTRA_CA_CERTS`). The app does not accept `verify=false` as an installation shortcut.
 
 The native client integration defaults to a local stdio gateway. Its connection to this server is HTTPS REST, avoiding clients that insist on a complete OAuth discovery flow for remote MCP. The service also exposes direct Streamable HTTP `/mcp` for clients that support explicit bearer credentials.
@@ -130,7 +143,7 @@ Before considering your server deployment complete, verify from an actual agent 
 1. HTTPS and authentication work; `agent-hub doctor` reports the expected project list.
 2. An unprivileged token cannot access a different project or activate a candidate.
 3. A synthetic session uploads, searches correctly, and survives a service restart.
-4. The intended native client lists all five memory tools and can retrieve that synthetic event.
+4. The intended native client lists all six memory tools and can retrieve that synthetic event.
 5. Supported hooks enqueue after a turn; the watcher process and queue status are visible; disconnect/reconnect recovers the pending upload while its source remains available.
 6. A backup restores on a separate empty data directory and original source text matches.
 

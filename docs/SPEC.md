@@ -36,7 +36,7 @@ The service is a Python application with SQLite on a local persistent filesystem
 | Client configuration and credential | Each execution host | Service URL, unique machine identity, explicit project mapping, scoped credential |
 | Capture hooks | Inside supported native client lifecycle | Fast local notification or bounded context injection |
 | Watcher/uploader | Each execution host | Retry queued sources, scan configured capture roots, maintain checkpoints, and backfill history |
-| Stdio MCP gateway | Started by native client | Expose five memory tools while forwarding authenticated requests to server |
+| Stdio MCP gateway | Started by native client | Expose six memory tools while forwarding authenticated requests to server |
 | Enrichment worker | Server | Deterministic candidate selection; opt-in model summaries and candidates |
 | Integration catalog | Git repository/package | Reviewed inventory of MCP/plugin/skill definitions and setup conventions |
 
@@ -157,11 +157,14 @@ All `/mcp` access requires a bearer token. `/v1` access requires a bearer token 
 
 | MCP tool | Purpose | Bounds and state |
 | --- | --- | --- |
+| `memory_projects()` | Project discovery | Projects this token can read, and the default project |
 | `memory_context(project, budget_chars, query)` | Startup/task context | Character-bounded history, explicit truncation |
 | `memory_search(project, query, limit)` | Original-event and memory lexical search | Query up to 1,000 characters; 1–50 hits |
 | `memory_get(project, kind, id, offset, limit, max_chars, representation)` | Event, session, or memory detail | Event text/raw pages up to 24,000 chars; session offsets count records |
 | `memory_zoom(project, node_id)` | Hierarchical navigation | A span reference `lo+n` (n a power of two, lo a multiple of n; `lo+1` is one record) or a node ID; children, or the first 1,000-character leaf preview. A malformed reference is refused with the tree's top references. Search hits and context lines carry references |
 | `memory_note(project, statement, kind, source_event_ids, idempotency_key)` | Candidate proposal | Statement up to 8,000 chars; never activates a note |
+
+On the server's HTTP `/mcp`, `project` is optional on every tool. Left out, it resolves to `default_project` from the server settings or, when that is unset and the server has exactly one project, that project. The server instructions name the valid projects in the server's domain. A project the caller's token cannot read is reported as unknown, with the projects that token can read, whether the named project exists or not; a token that can read a project but not write it gets a separate permission error. The stdio gateway does the same from `client.json`: its default is the project mapped to its working directory, else `project`; its instructions name the configured projects, and a name outside the profile's domain or allowlist is refused before any request with the configured names.
 
 An event response distinguishes normalized text from raw representation, gives total character count and `next_offset`, and indicates whether it is truncated. A session result gives bounded event previews and the next record offset. The authenticated raw-download route returns the complete captured record for file workflows.
 
