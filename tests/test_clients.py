@@ -1098,3 +1098,25 @@ def test_setup_keeps_codex_tool_approvals_and_other_settings(cfg, tmp_path):
     codex_file.write_text(codex_file.read_text().replace('command = "', 'command = "/other/'))
     with pytest.raises(ClientError, match="manually changed"):
         setup_clients(cfg, config_path, **kwargs)
+
+
+def test_watch_timeout_is_bounded_and_used_for_uploads(cfg, tmp_path, monkeypatch, capsys):
+    from agent_hub import cli
+    path = cfg.save(tmp_path / "client.json")
+    base = ["--config", str(path), "watch", "--once", "--no-scan"]
+    for bad in ["0", "601"]:
+        assert main(base + ["--timeout", bad]) == 1
+    seen = {}
+    real = cli.MemoryClient
+    def client(config, *, timeout):
+        seen["client"] = real(config, timeout=timeout)
+        seen["timeout"] = timeout
+        return seen["client"]
+    def drain(config, *, state, memory):
+        seen["memory"] = memory
+        return {"completed": 0, "failed": 0, "results": [], **state.status()}
+    monkeypatch.setattr(cli, "MemoryClient", client)
+    monkeypatch.setattr(cli, "drain_queue", drain)
+    assert main(base + ["--timeout", "180"]) == 0
+    assert seen["timeout"] == 180 and seen["memory"] is seen["client"]
+    assert seen["client"].http.is_closed
