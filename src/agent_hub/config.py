@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ServerSettings(BaseModel):
@@ -20,6 +20,9 @@ class ServerSettings(BaseModel):
     allowed_hosts: list[str] = ["127.0.0.1", "localhost", "[::1]"]
     allowed_origins: list[str] = ["http://127.0.0.1:8765", "http://localhost:8765"]
     max_body_bytes: int = Field(default=4_194_304, ge=1024, le=67_108_864)
+    # MCP tools use this project when a call leaves `project` out. Unset, a server
+    # with exactly one project uses that one.
+    default_project: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
 
     @field_validator("schema_version")
     @classmethod
@@ -39,6 +42,12 @@ class ServerSettings(BaseModel):
         if any("*" in item or not item for item in value):
             raise ValueError("Use explicit hosts/origins; wildcard access is not supported")
         return value
+
+    @model_validator(mode="after")
+    def default_in_domain(self) -> "ServerSettings":
+        if self.default_project:
+            self.check_project(self.default_project)
+        return self
 
     @property
     def database(self) -> Path:

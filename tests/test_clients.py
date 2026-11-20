@@ -873,7 +873,7 @@ def test_official_sdk_stdio_round_trip_to_http(cfg, tmp_path):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
-                assert {tool.name for tool in tools.tools} == {"memory_context", "memory_search", "memory_get", "memory_zoom", "memory_note"}
+                assert {tool.name for tool in tools.tools} == {"memory_context", "memory_search", "memory_get", "memory_zoom", "memory_note", "memory_projects"}
                 response = await session.call_tool("memory_context", {"project": "atlas", "budget_chars": 1000})
                 assert not response.isError
                 assert "synthetic source-backed context" in str(response.content)
